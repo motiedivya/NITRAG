@@ -1,0 +1,6 @@
+pymupdf
+pyarrow
+tiktoken
+numpy
+pandas
+matplotlib
