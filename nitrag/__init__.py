@@ -6,6 +6,7 @@ from .chunk_metadata_enrichment_evaluation import ChunkMetadataEnrichmentEvaluat
 from .chunk_metadata_enricher import ChunkMetadataEnricher
 from .clinical_metadata_extractor import ClinicalMetadataExtractor
 from .document_metadata_extractor import PyMuPDFLayoutExtractor
+from .pdf_ingestion import PDFIngestionPipeline, IngestionConfig, PageType
 from .final_evaluation import FinalEvaluationManager
 from .index_manager import IndexManager, register_default_indexers
 from .indexing_evaluation import IndexingEvaluationManager
