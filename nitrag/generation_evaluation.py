@@ -46,6 +46,7 @@ class EvaluationReport:
             "citation_coverage": self.citation_coverage,
             "hallucination_risk": self.hallucination_risk,
             "context_recall": self.context_recall,
+            "overall_score": self.overall_score,
             "sentence_risks": self.sentence_risks,
             "notes": self.notes,
         }

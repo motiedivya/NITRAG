@@ -49,10 +49,15 @@ a{color:inherit;text-decoration:none}
 sup{line-height:0}
 
 /* ── App layout ─────────────────────────────────────────────── */
-#app{display:grid;grid-template-columns:var(--sidebar-w) 1fr var(--evidence-w);height:100vh;overflow:hidden}
+#app{display:flex;height:100vh;overflow:hidden}
 
 /* ── Sidebar ────────────────────────────────────────────────── */
-#sidebar{background:var(--sidebar-bg);color:var(--sidebar-text);display:flex;flex-direction:column;overflow:hidden;border-right:1px solid var(--sidebar-bd)}
+#sidebar{flex:0 0 var(--sidebar-w);background:var(--sidebar-bg);color:var(--sidebar-text);display:flex;flex-direction:column;overflow:hidden;border-right:1px solid var(--sidebar-bd);transition:flex-basis .28s ease,border-right-width .28s ease}
+#app.sb-closed #sidebar{flex:0 0 0px;border-right-width:0}
+
+/* sidebar toggle button */
+.sb-toggle{display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:var(--r);color:var(--muted);border:1px solid var(--border);background:var(--white);cursor:pointer;flex-shrink:0;transition:color .12s,background .12s}
+.sb-toggle:hover{color:var(--text);background:var(--bg)}
 .sb-logo{padding:20px 18px 16px;border-bottom:1px solid var(--sidebar-bd);flex-shrink:0}
 .sb-logo .wm{font-size:17px;font-weight:700;color:var(--sidebar-hi);letter-spacing:-.3px}
 .sb-logo .wm span{color:#38BDF8}
@@ -119,7 +124,7 @@ sup{line-height:0}
 .no-hist{font-size:11.5px;color:var(--sidebar-text);padding:6px 2px}
 
 /* ── Workspace ──────────────────────────────────────────────── */
-#workspace{display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
+#workspace{flex:1 1 0;min-width:0;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
 
 /* query bar */
 #query-bar{padding:16px 20px;background:var(--white);border-bottom:1px solid var(--border);flex-shrink:0;box-shadow:var(--sh)}
@@ -199,6 +204,33 @@ sup{line-height:0}
 
 /* error */
 .error-card{background:var(--error-bg);border:1px solid #FCA5A5;border-radius:var(--r-lg);padding:18px 20px;margin-bottom:16px}
+
+/* ── Markdown rendered answer ───────────────────────────────── */
+.answer-text .md-h2{font-size:15px;font-weight:700;color:var(--text);margin:18px 0 6px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+.answer-text .md-h3{font-size:13.5px;font-weight:700;color:var(--text);margin:14px 0 5px}
+.answer-text .md-h4{font-size:13px;font-weight:600;color:var(--muted);margin:10px 0 4px;text-transform:uppercase;letter-spacing:.4px;font-size:11px}
+.answer-text .md-h2:first-child,.answer-text .md-h3:first-child{margin-top:0}
+.answer-text .md-p{margin:0 0 6px;line-height:1.75}
+.answer-text .md-p:last-child{margin-bottom:0}
+.answer-text .md-gap{height:8px}
+.answer-text .md-ul,.answer-text .md-ol{margin:4px 0 8px 18px;padding:0}
+.answer-text .md-ul li,.answer-text .md-ol li{margin-bottom:4px;line-height:1.7}
+.answer-text strong{font-weight:600;color:var(--text)}
+.answer-text em{font-style:italic;color:var(--muted)}
+
+/* ── Summary loading state ──────────────────────────────────── */
+.sum-load-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:55vh;text-align:center;gap:12px;padding:40px 20px}
+.sum-load-icon{font-size:36px;opacity:.6;margin-bottom:4px}
+.sum-load-title{font-size:17px;font-weight:600;color:var(--text)}
+.sum-load-sub{font-size:13px;color:var(--muted);max-width:380px;line-height:1.6}
+.sum-load-bar-track{width:320px;max-width:80%;height:5px;background:var(--border);border-radius:3px;overflow:hidden;margin-top:4px}
+.sum-load-bar{height:100%;width:40%;background:var(--primary);border-radius:3px;animation:sum-slide 1.8s ease-in-out infinite}
+@keyframes sum-slide{0%{transform:translateX(-100%);width:45%}50%{width:65%}100%{transform:translateX(260%);width:45%}}
+.sum-load-steps{display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap;justify-content:center}
+.sum-step{font-size:11px;padding:3px 9px;border-radius:12px;background:var(--border);color:var(--muted);font-weight:500}
+.sum-step.done{background:var(--success-bg);color:var(--success)}
+.sum-step.active{background:var(--primary-lt);color:var(--primary);font-weight:600;animation:pulse 1.4s ease-in-out infinite}
+.sum-step-arrow{font-size:11px;color:var(--dim)}
 .error-title{font-weight:600;color:var(--error);margin-bottom:4px;font-size:14px}
 .error-msg{font-size:12.5px;color:#991B1B;font-family:'Courier New',monospace;white-space:pre-wrap;word-break:break-word;margin-bottom:10px}
 .error-hint{font-size:12.5px;color:var(--muted)}
@@ -207,7 +239,8 @@ sup{line-height:0}
 .retry-btn:hover{opacity:.85}
 
 /* ── Evidence panel ─────────────────────────────────────────── */
-#evidence-panel{background:var(--white);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+#evidence-panel{flex:0 0 var(--evidence-w);background:var(--white);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;transition:flex-basis .28s ease}
+#app.sb-closed #evidence-panel{flex:0 0 50%}
 .ep-hd{padding:14px 16px;border-bottom:1px solid var(--border);background:var(--white);flex-shrink:0;display:flex;align-items:center;justify-content:space-between}
 .ep-ttl{font-size:13px;font-weight:600;color:var(--text);display:flex;align-items:center;gap:8px}
 .ep-ct{font-size:11px;background:var(--border);color:var(--muted);padding:1px 6px;border-radius:10px;font-family:'Courier New',monospace;font-variant-numeric:tabular-nums}
@@ -242,6 +275,18 @@ sup{line-height:0}
 .conf-b.l{background:var(--error)}
 .conf-v{font-family:'Courier New',monospace;font-size:10.5px;color:var(--muted);min-width:28px;font-variant-numeric:tabular-nums}
 .cite-quote{font-family:'Courier New',monospace;font-size:11.5px;color:var(--muted);line-height:1.55;background:var(--bg);border-radius:4px;padding:8px 10px;margin-bottom:8px;max-height:80px;overflow:hidden;position:relative;cursor:text;user-select:text}
+/* PDF page preview in citation cards */
+.cite-pdf-wrap{border:1.5px solid var(--cite-bd);border-radius:var(--r);overflow:hidden;background:#fff;margin-bottom:8px;cursor:zoom-in;transition:box-shadow .15s,border-color .15s;position:relative}
+.cite-pdf-wrap:hover{box-shadow:var(--sh-md);border-color:var(--cite-hi)}
+.cite-pdf-wrap::after{content:'🔍';position:absolute;bottom:5px;right:7px;font-size:13px;opacity:0;transition:opacity .15s;pointer-events:none;filter:drop-shadow(0 1px 2px rgba(0,0,0,.3))}
+.cite-pdf-wrap:hover::after{opacity:.8}
+.cite-pdf-img{width:100%;display:block;opacity:0;transition:opacity .3s}
+.cite-pdf-img.loaded{opacity:1}
+/* open-in-PDF icon button in card header */
+.pdf-open-btn{display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:3px;color:var(--dim);flex-shrink:0;transition:color .12s,background .12s;margin-top:1px}
+.pdf-open-btn:hover{color:var(--primary);background:var(--primary-lt)}
+/* summary action button */
+.ex-q-summary{background:var(--primary-lt);border-color:var(--primary);color:var(--primary);font-weight:600}
 .cite-quote.exp{max-height:none}
 .cq-fade{position:absolute;bottom:0;left:0;right:0;height:28px;background:linear-gradient(to bottom,transparent,var(--bg));pointer-events:none}
 .cq-toggle{font-size:10.5px;color:var(--primary);cursor:pointer;margin-top:3px;display:inline-block}
@@ -284,6 +329,20 @@ sup{line-height:0}
 .toast.show{transform:translateX(-50%) translateY(0)}
 .toast.error{background:var(--error)}
 .toast.success{background:var(--success)}
+
+/* ── Image lightbox ─────────────────────────────────────────── */
+#img-lightbox{display:none;position:fixed;inset:0;z-index:300;align-items:center;justify-content:center;background:rgba(0,0,0,.82)}
+#img-lightbox.open{display:flex}
+#lbox-inner{position:relative;max-width:92vw;max-height:92vh;display:flex;flex-direction:column;align-items:center;gap:10px}
+#lbox-scroll{overflow:auto;max-width:90vw;max-height:80vh;border-radius:6px;background:#fff;cursor:zoom-in}
+#lbox-scroll.zoomed{cursor:grab}
+#lbox-scroll.zoomed:active{cursor:grabbing}
+#lbox-img{display:block;transition:transform .15s ease;transform-origin:center center}
+.lbox-bar{display:flex;align-items:center;gap:8px}
+.lbox-btn{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:6px;background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.18);font-size:16px;font-weight:700;cursor:pointer;transition:background .12s;user-select:none}
+.lbox-btn:hover{background:rgba(255,255,255,.22)}
+#lbox-label{font-size:12px;color:rgba(255,255,255,.6);flex:1;text-align:center}
+#lbox-zoom-val{font-size:12px;color:rgba(255,255,255,.5);min-width:36px;text-align:center;font-family:var(--mono)}
 </style>
 
 <div id="app">
@@ -343,6 +402,9 @@ sup{line-height:0}
   <main id="workspace">
     <div id="query-bar">
       <div class="qi">
+        <button id="sb-toggle" class="sb-toggle" title="Toggle sidebar (documents &amp; config)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+        </button>
         <textarea id="query-input" placeholder="Ask a clinical question… (Enter to submit, Ctrl+K to focus)" rows="1" spellcheck="false"></textarea>
         <button id="submit-btn">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
@@ -381,6 +443,25 @@ sup{line-height:0}
           <div class="ls-row" id="ls-retrieve"><div class="ls-icon">R</div><div>Retrieving relevant passages…</div></div>
           <div class="ls-row" id="ls-rerank"><div class="ls-icon">↕</div><div>Reranking by clinical relevance…</div></div>
           <div class="ls-row" id="ls-generate"><div class="ls-icon">G</div><div>Generating grounded answer…</div></div>
+        </div>
+      </div>
+
+      <!-- Summary loading -->
+      <div id="summary-loading" style="display:none">
+        <div class="sum-load-wrap">
+          <div class="sum-load-icon">📋</div>
+          <div class="sum-load-title">Generating Narrative Summary</div>
+          <div class="sum-load-sub" id="sum-load-sub">Retrieving all document passages and generating with GPT-4o…</div>
+          <div class="sum-load-bar-track"><div class="sum-load-bar"></div></div>
+          <div class="sum-load-steps">
+            <span class="sum-step done">Retrieve</span>
+            <span class="sum-step-arrow">→</span>
+            <span class="sum-step done">Assemble context</span>
+            <span class="sum-step-arrow">→</span>
+            <span class="sum-step active">Generate</span>
+            <span class="sum-step-arrow">→</span>
+            <span class="sum-step">Cache</span>
+          </div>
         </div>
       </div>
 
@@ -427,6 +508,21 @@ sup{line-height:0}
   </div>
 </div>
 
+<!-- Image lightbox -->
+<div id="img-lightbox">
+  <div id="lbox-inner">
+    <div id="lbox-scroll"><img id="lbox-img" src="" alt=""></div>
+    <div class="lbox-bar">
+      <button class="lbox-btn" id="lbox-zoom-out" title="Zoom out">−</button>
+      <span id="lbox-zoom-val">100%</span>
+      <button class="lbox-btn" id="lbox-zoom-in" title="Zoom in">+</button>
+      <button class="lbox-btn" id="lbox-zoom-reset" title="Reset zoom" style="font-size:11px">↺</button>
+      <span id="lbox-label"></span>
+      <button class="lbox-btn" id="lbox-close" title="Close (Esc)">✕</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div id="toast" class="toast"></div>
 
@@ -449,6 +545,7 @@ const S = {
 };
 
 const EX = [
+  {icon:'📋', q:'Summarize this document', summary:true},
   {icon:'💊', q:'What medications were prescribed and at what dose?'},
   {icon:'🩺', q:'What is the primary diagnosis or clinical impression?'},
   {icon:'📊', q:'What were the patient\'s vital signs?'},
@@ -458,13 +555,14 @@ const EX = [
 ];
 
 const PIPE_STAGES = [
-  {id:'layout',        label:'Document Layout'},
-  {id:'clinical',      label:'Clinical Metadata'},
-  {id:'chunks',        label:'Chunking'},
-  {id:'enriched',      label:'Metadata Enrichment'},
-  {id:'lexical_index', label:'Lexical Indexing'},
-  {id:'embeddings',    label:'Embeddings'},
-  {id:'vector_index',  label:'Vector Index'},
+  {id:'layout',             label:'Document Layout'},
+  {id:'clinical',           label:'Clinical Metadata'},
+  {id:'chunks',             label:'Chunking'},
+  {id:'enriched',           label:'Metadata Enrichment'},
+  {id:'lexical_index',      label:'Lexical Indexing'},
+  {id:'embeddings',         label:'Embeddings'},
+  {id:'vector_index',       label:'Vector Index'},
+  {id:'narrative_summary',  label:'Narrative Summary'},
 ];
 
 // ─── DOM ─────────────────────────────────────────────────────────────────────
@@ -476,6 +574,8 @@ const E = {
   docInd:     $('doc-indicator'),
   welcome:    $('welcome'),
   loadState:  $('loading-state'),
+  sumLoading: $('summary-loading'),
+  sumLoadSub: $('sum-load-sub'),
   respContent:$('response-content'),
   qText:      $('query-text'),
   aText:      $('answer-text'),
@@ -498,6 +598,13 @@ const E = {
   procStages: $('proc-stages-list'),
   procErrMsg: $('proc-error-msg'),
   procCloseBtn:$('proc-close-btn'),
+  sbToggle:   $('sb-toggle'),
+  app:        $('app'),
+  lbox:       $('img-lightbox'),
+  lboxImg:    $('lbox-img'),
+  lboxLabel:  $('lbox-label'),
+  lboxZoomVal:$('lbox-zoom-val'),
+  lboxScroll: $('lbox-scroll'),
 };
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
@@ -519,6 +626,7 @@ function bindEvents() {
   E.cfgSel.addEventListener('change', () => { S.preset = E.cfgSel.value; });
   E.fileInput.addEventListener('change', handleUpload);
   E.exportBtn.addEventListener('click', exportAnswer);
+  E.sbToggle.addEventListener('click', toggleSidebar);
 
   // Keyboard shortcuts
   document.addEventListener('keydown', e => {
@@ -527,8 +635,22 @@ function bindEvents() {
       E.qInput.focus();
       E.qInput.select();
     }
-    if (e.key === 'Escape' && S.loading) abortQuery();
+    if (e.key === 'Escape') {
+      if (E.lbox.classList.contains('open')) { closeLightbox(); return; }
+      if (S.loading) abortQuery();
+    }
   });
+
+  // Lightbox events
+  $('lbox-close').addEventListener('click', closeLightbox);
+  $('lbox-zoom-in').addEventListener('click', () => stepZoom(0.25));
+  $('lbox-zoom-out').addEventListener('click', () => stepZoom(-0.25));
+  $('lbox-zoom-reset').addEventListener('click', () => setZoom(1));
+  E.lbox.addEventListener('click', e => { if (e.target === E.lbox || e.target.id === 'lbox-inner') closeLightbox(); });
+  E.lboxScroll.addEventListener('wheel', e => {
+    e.preventDefault();
+    stepZoom(e.deltaY < 0 ? 0.15 : -0.15);
+  }, {passive: false});
 
   // Evidence tabs
   document.querySelectorAll('.ep-tab').forEach(t =>
@@ -551,7 +673,12 @@ function bindEvents() {
     const r = e.target.closest('.cite-ref');
     if (r) { scrollToCite(r.dataset.n); return; }
     const q = e.target.closest('.ex-q');
-    if (q) { E.qInput.value = q.dataset.q; E.qInput.focus(); autoResize(); }
+    if (q) {
+      const action = q.dataset.action;
+      if (action === 'load-summary') { loadNarrativeSummary(S.docId); return; }
+      if (action === 'gen-summary') { triggerSummaryGeneration(); return; }
+      if (q.dataset.q) { E.qInput.value = q.dataset.q; E.qInput.focus(); autoResize(); }
+    }
   });
 
   // Evidence expand / history click
@@ -568,6 +695,10 @@ function bindEvents() {
       }
     }
   });
+  // Fade in PDF page images once loaded
+  E.epBody.addEventListener('load', e => {
+    if (e.target.classList.contains('cite-pdf-img')) e.target.classList.add('loaded');
+  }, true);
   E.histList.addEventListener('click', e => {
     const item = e.target.closest('.hist-item');
     if (item) loadHistoryItem(+item.dataset.idx);
@@ -589,6 +720,39 @@ function autoResize() {
   E.qInput.style.height = 'auto';
   E.qInput.style.height = Math.min(E.qInput.scrollHeight, 120) + 'px';
 }
+
+// ─── Sidebar toggle ───────────────────────────────────────────────────────────
+function toggleSidebar() { E.app.classList.toggle('sb-closed'); }
+function closeSidebar()  { E.app.classList.add('sb-closed'); }
+function openSidebar()   { E.app.classList.remove('sb-closed'); }
+
+// ─── Lightbox ─────────────────────────────────────────────────────────────────
+let _lboxScale = 1;
+
+function openLightbox(src, label) {
+  E.lboxImg.src = src;
+  E.lboxLabel.textContent = label || '';
+  _lboxScale = 1;
+  E.lboxImg.style.transform = 'scale(1)';
+  E.lboxScroll.classList.remove('zoomed');
+  E.lboxZoomVal.textContent = '100%';
+  E.lbox.classList.add('open');
+}
+
+function closeLightbox() {
+  E.lbox.classList.remove('open');
+  // clear src to stop any pending load
+  E.lboxImg.src = '';
+}
+
+function setZoom(scale) {
+  _lboxScale = Math.max(0.5, Math.min(6, scale));
+  E.lboxImg.style.transform = `scale(${_lboxScale})`;
+  E.lboxZoomVal.textContent = Math.round(_lboxScale * 100) + '%';
+  E.lboxScroll.classList.toggle('zoomed', _lboxScale > 1);
+}
+
+function stepZoom(delta) { setZoom(_lboxScale + delta); }
 
 // ─── Documents ───────────────────────────────────────────────────────────────
 async function loadDocs() {
@@ -635,7 +799,25 @@ function selectDoc(id) {
   renderDocs();
   updateStages(S.doc);
   updateDocInd();
-  showWelcome();
+  if (S.doc?.has_summary) {
+    loadNarrativeSummary(id);
+  } else {
+    showWelcome();
+  }
+}
+
+async function loadNarrativeSummary(docId) {
+  showSummaryLoading('Loading Narrative Summary…');
+  try {
+    const r = await fetch(`/api/documents/${encodeURIComponent(docId)}/summary`);
+    hideSummaryLoading();
+    if (!r.ok) { showWelcome(); return; }
+    const data = await r.json();
+    S.response = data;
+    S.docId = docId;
+    renderResponse(data);
+    E.qText.innerHTML = `<span style="color:var(--primary);font-weight:700">&#128203; Narrative Summary</span>`;
+  } catch { hideSummaryLoading(); showWelcome(); }
 }
 
 function updateDocInd() {
@@ -753,10 +935,27 @@ function showLoading() {
 
 function hideLoading() { E.loadState.classList.remove('active'); }
 
+function showSummaryLoading(msg) {
+  E.welcome.style.display = 'none';
+  E.loadState.classList.remove('active');
+  E.respContent.classList.remove('active');
+  E.sumLoading.style.display = '';
+  if (msg) E.sumLoadSub.textContent = msg;
+  E.epBody.innerHTML = '<div class="ep-empty"><div class="ep-empty-icon">📋</div>Generating summary…</div>';
+  E.epCount.textContent = '0';
+}
+
+function hideSummaryLoading() { E.sumLoading.style.display = 'none'; }
+
 function renderExamples(doc) {
   if (!doc) { E.exQs.innerHTML = '<div class="ex-lbl">Select a document to begin</div>'; return; }
-  E.exQs.innerHTML = '<div class="ex-lbl">Example queries</div>' +
-    EX.map(x => `<button class="ex-q" data-q="${esc(x.q)}">${x.icon} ${esc(x.q)}</button>`).join('');
+  const summaryBtn = doc.has_summary
+    ? `<button class="ex-q ex-q-summary" data-action="load-summary">📋 View Narrative Summary</button>`
+    : `<button class="ex-q ex-q-summary" data-action="gen-summary">📋 Generate Narrative Summary</button>`;
+  const regularBtns = EX.filter(x => !x.summary)
+    .map(x => `<button class="ex-q" data-q="${esc(x.q)}">${x.icon} ${esc(x.q)}</button>`)
+    .join('');
+  E.exQs.innerHTML = '<div class="ex-lbl">Actions &amp; example queries</div>' + summaryBtn + regularBtns;
 }
 
 // ─── Response rendering ───────────────────────────────────────────────────────
@@ -795,12 +994,65 @@ function renderError(msg, query) {
   E.epCount.textContent = '0';
 }
 
-function fmtAnswer(text) {
-  return text
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/\[(\d+)\]/g, (_,n) => `<sup class="cite-ref" data-n="${n}" tabindex="0" role="button" aria-label="Citation ${n}">[${n}]</sup>`)
-    .replace(/\n\n/g,'</p><p>').replace(/\n/g,'<br>')
-    .replace(/^/,'<p>').replace(/$/,'</p>');
+// ─── Inline markdown (bold, italic, citations) ───────────────────────────────
+function inlineMd(s) {
+  return s
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*\n]+?)\*/g, '<em>$1</em>')
+    .replace(/\[(\d+)\]/g, (_,n) =>
+      `<sup class="cite-ref" data-n="${n}" tabindex="0" role="button" aria-label="Citation ${n}">[${n}]</sup>`);
+}
+
+function fmtAnswer(raw) {
+  // Escape HTML first, then apply markdown
+  const e = s => String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+  const lines = raw.split('\n');
+  const out = [];
+  let inUl = false, inOl = false;
+
+  const closeList = () => {
+    if (inUl) { out.push('</ul>'); inUl = false; }
+    if (inOl) { out.push('</ol>'); inOl = false; }
+  };
+
+  for (const raw_line of lines) {
+    const line = raw_line.trimEnd();
+
+    // ATX headings
+    const h3 = line.match(/^### (.+)/);  if (h3) { closeList(); out.push(`<h4 class="md-h4">${inlineMd(e(h3[1]))}</h4>`); continue; }
+    const h2 = line.match(/^## (.+)/);   if (h2) { closeList(); out.push(`<h3 class="md-h3">${inlineMd(e(h2[1]))}</h3>`); continue; }
+    const h1 = line.match(/^# (.+)/);    if (h1) { closeList(); out.push(`<h2 class="md-h2">${inlineMd(e(h1[1]))}</h2>`); continue; }
+
+    // Unordered list
+    const ul = line.match(/^[-*] (.+)/);
+    if (ul) {
+      if (inOl) { out.push('</ol>'); inOl = false; }
+      if (!inUl) { out.push('<ul class="md-ul">'); inUl = true; }
+      out.push(`<li>${inlineMd(e(ul[1]))}</li>`);
+      continue;
+    }
+
+    // Ordered list
+    const ol = line.match(/^\d+\. (.+)/);
+    if (ol) {
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      if (!inOl) { out.push('<ol class="md-ol">'); inOl = true; }
+      out.push(`<li>${inlineMd(e(ol[1]))}</li>`);
+      continue;
+    }
+
+    closeList();
+
+    if (!line.trim()) { out.push('<div class="md-gap"></div>'); continue; }
+
+    out.push(`<p class="md-p">${inlineMd(e(line))}</p>`);
+  }
+
+  closeList();
+  return out.join('');
 }
 
 function renderEval(ev) {
@@ -846,13 +1098,20 @@ function renderCitations() {
   if (!cites.length) { E.epBody.innerHTML = '<div class="ep-empty"><div class="ep-empty-icon">📋</div>No citations in this answer</div>'; return; }
   const byN = {};
   (S.response.context?.chunks||[]).forEach(ch => { byN[ch.citation_number] = ch; });
+  const docId = S.response.doc_id || S.docId || '';
   E.epBody.innerHTML = cites.map(c => {
     const ch = byN[c.number]||{};
     const page = c.page_start===c.page_end ? `Page ${c.page_start+1}` : `Pages ${c.page_start+1}–${c.page_end+1}`;
     const pct = Math.round((c.confidence||0)*100);
     const cc = pct>=60?'':pct>=30?'m':'l';
     const quote = c.quote||'';
-    const long = quote.length > 140;
+    // PDF page rendering
+    const pageImgUrl = docId
+      ? `/api/documents/${encodeURIComponent(docId)}/page/${c.page_start}?q=${encodeURIComponent(quote.slice(0,600))}`
+      : '';
+    const pdfUrl = docId
+      ? `/api/documents/${encodeURIComponent(docId)}/pdf#page=${c.page_start+1}`
+      : '';
     return `<div class="cite-card" data-n="${c.number}" id="cc-${c.number}" tabindex="0">
       <div class="cc-hd">
         <div class="cite-num">${c.number}</div>
@@ -860,12 +1119,46 @@ function renderCitations() {
           <div class="cite-src-lbl">${esc(c.source_label||page)}</div>
           <div class="cite-pg">${esc(page)}${c.section?' · '+esc(c.section.slice(0,40)):''}</div>
         </div>
+        ${pdfUrl ? `<a href="${pdfUrl}" target="_blank" class="pdf-open-btn" title="Open in PDF">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+        </a>` : ''}
       </div>
       <div class="conf-row"><div class="conf-bw"><div class="conf-b ${cc}" style="width:${pct}%"></div></div><span class="conf-v">${pct}%</span></div>
-      ${quote?`<div class="cite-quote" id="cq-${c.number}">"${esc(quote)}"${long?'<div class="cq-fade"></div>':''}</div>${long?`<button class="cq-toggle">Show more</button>`:''}`:''}
+      ${pageImgUrl ? `<div class="cite-pdf-wrap" title="Click to zoom • Opens at full resolution" onclick="openLightbox('${pageImgUrl}','${esc(page)}')">
+        <img src="${pageImgUrl}" loading="lazy" class="cite-pdf-img" alt="${esc(page)}"
+          onerror="this.closest('.cite-pdf-wrap').style.display='none'">
+      </div>` : ''}
       <div class="cite-tags">${tags(ch)}</div>
     </div>`;
   }).join('');
+}
+
+async function triggerSummaryGeneration() {
+  if (!S.docId) return;
+  const docId = S.docId;
+  showSummaryLoading('Retrieving passages and generating with GPT-4o… (~30s)');
+  try {
+    const r = await fetch(`/api/documents/${encodeURIComponent(docId)}/summarize`, {method:'POST'});
+    const d = await r.json();
+    if (d.status === 'already_exists') { await loadDocs(); loadNarrativeSummary(docId); return; }
+    // Poll status until done
+    const t = setInterval(async () => {
+      const sr = await fetch(`/api/process/status/${encodeURIComponent(docId)}`).catch(()=>null);
+      if (!sr || !sr.ok) return;
+      const sd = await sr.json();
+      if (sd.done) {
+        clearInterval(t);
+        hideSummaryLoading();
+        await loadDocs();
+        if (sd.status === 'error') {
+          toast('Summary generation failed: ' + (sd.message||''), 'error');
+          showWelcome();
+        } else {
+          loadNarrativeSummary(docId);
+        }
+      }
+    }, 3000);
+  } catch(e) { hideSummaryLoading(); toast(e.message, 'error'); showWelcome(); }
 }
 
 function renderAllChunks() {
@@ -992,22 +1285,33 @@ function pollProcessing(docId) {
       // Handle placeholder → real doc_id resolution
       const realId = d.doc_id || docId;
       renderProcStages(d.current_stage, d.status);
-      if (d.status === 'error') {
+      // Show live message for narrative summary stage
+      if (d.current_stage === 'narrative_summary' && d.status === 'running') {
+        E.procSub.textContent = 'Generating Narrative Summary with GPT-4o…';
+      }
+      // Error on non-summary stage = hard failure
+      if (d.status === 'error' && d.current_stage !== 'narrative_summary') {
         clearInterval(S.procTimer);
         E.procErrMsg.textContent = d.message || 'An error occurred';
         E.procErrMsg.style.display = '';
         E.procSub.textContent = 'Processing failed';
         return;
       }
-      if (d.done || (d.stages && Object.values(d.stages).every(Boolean))) {
+      if (d.done) {
         clearInterval(S.procTimer);
-        E.procSub.textContent = 'Processing complete — document is ready';
-        renderProcStages('vector_index', 'done');
-        toast('Document ready for querying', 'success');
+        const summaryFailed = d.current_stage === 'narrative_summary' && d.status === 'error';
+        E.procSub.textContent = summaryFailed
+          ? 'Document ready — Narrative Summary could not be generated'
+          : 'Document ready — Narrative Summary generated';
+        renderProcStages('narrative_summary', summaryFailed ? 'error' : 'done');
+        toast(summaryFailed ? 'Document ready for querying' : 'Document ready with Narrative Summary', 'success');
         await loadDocs();
-        // Auto-select the newly processed doc
-        if (realId !== docId && S.docs.find(x => x.doc_id === realId)) {
-          selectDoc(realId);
+        // Auto-close modal and sidebar, then show summary or welcome
+        setTimeout(() => E.procModal.classList.remove('open'), 1200);
+        closeSidebar();
+        const targetId = S.docs.find(x => x.doc_id === realId) ? realId : docId;
+        if (S.docs.find(x => x.doc_id === targetId)) {
+          selectDoc(targetId);
         }
       }
     } catch { /* server may be busy */ }

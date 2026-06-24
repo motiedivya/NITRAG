@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -63,9 +63,60 @@ _processing_status: Dict[str, Dict] = {}   # doc_id → {stage, error, done}
 CONFIG_PRESETS = {
     "local_ollama": "Local Ollama (llama3.1:8b + nomic-embed)",
     "fast_local": "Fast Local (mistral:7b + bge-small)",
-    "openai_cloud": "OpenAI Cloud (gpt-4o + text-embedding-3-large)",
+    "openai_cloud": "OpenAI Cloud (gpt-4o + text-embedding-3-small)",
     "medical_precise": "Medical Precise (HyDE + wide retrieval)",
 }
+
+NARRATIVE_SUMMARY_PROMPT = """\
+You are a senior clinical documentation specialist producing a Narrative Summary — \
+a formal, defensible medico-legal artifact used for care coordination, insurance \
+authorisation, specialist referral, and legal review.
+
+Write a comprehensive, clinically precise Narrative Summary of the document. \
+Include all applicable sections below; omit any section for which the document \
+contains no relevant information.
+
+## Patient & Encounter
+Full name, date of birth, sex, MRN / accession number, visit or exam date and time, \
+referring provider, facility, and document type.
+
+## Clinical Context
+Reason for study or visit. Presenting complaint. Relevant clinical history and indication.
+
+## Findings
+Organised by anatomical region or body system. Include all specific measurements, \
+signal characteristics, laterality, severity qualifiers, and verbatim descriptors \
+where clinically relevant. Quote exact numeric values.
+
+## Impression / Diagnoses
+Numbered list of primary and secondary diagnoses or radiological impressions. \
+Use precise ICD-style language where possible.
+
+## Medications & Treatments
+All medications with dose, route, and frequency. Any procedures performed or \
+treatments administered during this encounter.
+
+## Plan & Follow-Up
+Recommended next steps, follow-up imaging or testing, referrals, discharge instructions, \
+and patient-facing guidance.
+
+## Critical Flags
+Any urgent, critical, or actionable findings requiring immediate clinical attention. \
+Abnormal values outside reference ranges. Unexpected incidental findings.
+
+CITATION RULES (strictly enforced):
+1. Every factual claim MUST carry an inline [N] citation.
+2. Never write a sentence without at least one citation.
+3. All numeric values (measurements, doses, dates, lab results) MUST be cited.
+4. Place [N] immediately after the claim, before the full stop.
+5. Multiple citations per sentence are permitted and encouraged.
+
+STYLE:
+- Formal, professional clinical prose. Third person. Past tense for findings.
+- Precise medical terminology. No colloquialisms or hedging language.
+- Do not speculate or infer beyond the retrieved passages.
+- Do not summarise what you cannot cite.
+"""
 
 
 def _load_store(doc_id: str):
@@ -105,6 +156,34 @@ def _check_stages(doc_dir: Path) -> Dict[str, bool]:
     }
 
 
+def _get_pdf_path(doc_id: str) -> Optional[Path]:
+    doc_dir = RAG_STORE_ROOT / doc_id
+    manifest_path = doc_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        with open(manifest_path) as f:
+            mani = json.load(f)
+    except Exception:
+        return None
+    # Try absolute path stored in manifest
+    p = Path(mani.get("source_pdf_path", "") or "")
+    if p.is_absolute() and p.exists():
+        return p
+    # Try relative to project root
+    if p.parts:
+        pp = PROJECT_ROOT / p
+        if pp.exists():
+            return pp
+    # Fall back: name in data dir
+    name = mani.get("source_pdf_name", "")
+    if name:
+        pp = DATA_DIR / name
+        if pp.exists():
+            return pp
+    return None
+
+
 def _doc_info(doc_dir: Path) -> Optional[Dict[str, Any]]:
     manifest_path = doc_dir / "manifest.json"
     if not manifest_path.exists():
@@ -116,6 +195,7 @@ def _doc_info(doc_dir: Path) -> Optional[Dict[str, Any]]:
         return None
     stages = _check_stages(doc_dir)
     ready = stages.get("embeddings", False) and stages.get("vector_index", False)
+    has_summary = (doc_dir / "narrative_summary.json").exists()
     return {
         "doc_id": doc_dir.name,
         "source_name": mani.get("source_pdf_name", doc_dir.name),
@@ -123,7 +203,34 @@ def _doc_info(doc_dir: Path) -> Optional[Dict[str, Any]]:
         "document_type": mani.get("document_type") or "",
         "stages": stages,
         "ready": ready,
+        "has_summary": has_summary,
     }
+
+
+def _generate_narrative_summary(doc_id: str) -> None:
+    summary_path = RAG_STORE_ROOT / doc_id / "narrative_summary.json"
+    if summary_path.exists():
+        return
+    from nitrag.rag_pipeline import RAGPipeline
+    from nitrag.config import RAGConfig
+    store = _load_store(doc_id)
+    config = RAGConfig.openai_cloud()
+    config.llm.system_prompt = NARRATIVE_SUMMARY_PROMPT
+    config.generation.max_context_tokens = 8000
+    config.retrieval.top_k_retrieve = 40
+    config.retrieval.top_k_rerank = 20
+    pipeline = RAGPipeline(store, config)
+    response = pipeline.answer(
+        "Provide a comprehensive narrative summary of this entire clinical document, "
+        "covering all patients, findings, diagnoses, medications, treatments, and clinical plans.",
+        evaluate=False,
+    )
+    result = _serialize_response(response)
+    result["doc_id"] = doc_id
+    result["query"] = "Narrative Summary"
+    result["generated_at"] = time.time()
+    with open(summary_path, "w") as f:
+        json.dump(result, f, indent=2)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,6 +274,196 @@ async def get_document(doc_id: str):
         raise HTTPException(404, f"Document {doc_id!r} has no manifest")
     proc = _processing_status.get(doc_id, {})
     return {**info, "processing": proc}
+
+
+@app.get("/api/documents/{doc_id}/pdf")
+async def serve_pdf(doc_id: str):
+    pdf_path = _get_pdf_path(doc_id)
+    if pdf_path is None:
+        raise HTTPException(404, "Original PDF not found on disk")
+    return FileResponse(str(pdf_path), media_type="application/pdf", filename=pdf_path.name)
+
+
+def _split_into_sentences(text: str) -> list:
+    """Split text into matchable sentences."""
+    import re
+    # Split on sentence-ending punctuation followed by whitespace
+    parts = re.split(r'(?<=[.!?])\s+', text.strip())
+    # If only one part (no sentence breaks), try splitting on clause separators
+    if len(parts) == 1:
+        parts = re.split(r'(?:[;:])\s+', text.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _sentence_fragments(sentence: str) -> list:
+    """Return progressively shorter fragments of a sentence for fuzzy matching."""
+    words = sentence.split()
+    n = len(words)
+    frags = [sentence]
+    if n > 8:
+        frags.append(" ".join(words[:max(6, n * 4 // 5)]))
+    if n > 12:
+        frags.append(" ".join(words[:max(5, n * 3 // 5)]))
+    # Character-length fallbacks
+    for length in (80, 55, 35):
+        if len(sentence) > length + 10:
+            frags.append(sentence[:length])
+    return frags
+
+
+def _find_quote_rects(page, quote: str) -> list:
+    """Locate all rectangles on the page that correspond to the quote text.
+
+    Strategy 1 — sentence-by-sentence exact search using PyMuPDF.
+    Strategy 2 — word-overlap (Jaccard) on text blocks when exact search fails.
+    Returns (matched_rects, used_fallback).
+    """
+    import re
+    import fitz
+
+    matched: list = []
+
+    # ── Strategy 1: sentence-level exact search ──────────────────────────────
+    sentences = _split_into_sentences(quote)
+    for sent in sentences:
+        sent = sent.strip()
+        if len(sent) < 10:
+            continue
+        for frag in _sentence_fragments(sent):
+            frag = frag.strip()
+            if not frag:
+                continue
+            rects = page.search_for(frag)
+            if rects:
+                for r in rects[:6]:
+                    ann = page.add_highlight_annot(r)
+                    ann.set_colors(stroke=[1.0, 0.85, 0.0])
+                    ann.update()
+                    matched.append(r)
+                break  # found this sentence, move to next
+
+    if matched:
+        return matched
+
+    # ── Strategy 2: word-overlap fallback on text blocks ────────────────────
+    quote_words = set(re.findall(r"[a-z]+", quote.lower()))
+    if not quote_words:
+        return []
+
+    best_score = 0.0
+    best_rect = None
+    for block in page.get_text("blocks"):
+        if len(block) < 7 or block[6] != 0:          # skip image blocks
+            continue
+        bx0, by0, bx1, by1, btext = block[0], block[1], block[2], block[3], block[4]
+        if not btext or btext.isspace():
+            continue
+        bwords = set(re.findall(r"[a-z]+", btext.lower()))
+        if not bwords:
+            continue
+        jaccard = len(quote_words & bwords) / max(len(quote_words | bwords), 1)
+        if jaccard > best_score:
+            best_score = jaccard
+            best_rect = fitz.Rect(bx0, by0, bx1, by1)
+
+    if best_rect and best_score > 0.18:
+        ann = page.add_highlight_annot(best_rect)
+        ann.set_colors(stroke=[1.0, 0.85, 0.0])
+        ann.update()
+        return [best_rect]
+
+    return []
+
+
+@app.get("/api/documents/{doc_id}/page/{page_num}")
+async def render_page(doc_id: str, page_num: int, q: str = ""):
+    """Render a tight cropped snippet of a PDF page with exact sentence highlights."""
+    import fitz
+    pdf_path = _get_pdf_path(doc_id)
+    if pdf_path is None:
+        raise HTTPException(404, "Original PDF not found on disk")
+    try:
+        doc = fitz.open(str(pdf_path))
+    except Exception as e:
+        raise HTTPException(500, f"Cannot open PDF: {e}")
+    if page_num < 0 or page_num >= len(doc):
+        raise HTTPException(400, f"Page {page_num} out of range (0–{len(doc)-1})")
+
+    page = doc[page_num]
+    page_rect = page.rect
+    matched_rects: list = []
+
+    if q:
+        matched_rects = _find_quote_rects(page, q)
+
+    if matched_rects:
+        # Tight bounding box over all matched rects
+        x0 = min(r.x0 for r in matched_rects)
+        y0 = min(r.y0 for r in matched_rects)
+        x1 = max(r.x1 for r in matched_rects)
+        y1 = max(r.y1 for r in matched_rects)
+
+        # Estimate a line height and add ~2.5 lines of context padding
+        line_h = max(12.0, (y1 - y0) / max(len(matched_rects), 1))
+        pad_v = max(36.0, line_h * 2.5)
+
+        clip = fitz.Rect(
+            max(page_rect.x0, x0 - 16),
+            max(page_rect.y0, y0 - pad_v),
+            min(page_rect.x1, x1 + 16),
+            min(page_rect.y1, y1 + pad_v),
+        )
+        # Ensure a minimum clip height so single-line hits are still readable
+        if (clip.y1 - clip.y0) < 56:
+            clip = fitz.Rect(clip.x0,
+                             max(page_rect.y0, clip.y0 - 18),
+                             clip.x1,
+                             min(page_rect.y1, clip.y1 + 18))
+
+        mat = fitz.Matrix(2.8, 2.8)
+        pix = page.get_pixmap(matrix=mat, clip=clip, colorspace=fitz.csRGB)
+    else:
+        # No match — render full page at modest scale as fallback
+        mat = fitz.Matrix(1.8, 1.8)
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+
+    png = pix.tobytes("png")
+    doc.close()
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
+@app.get("/api/documents/{doc_id}/summary")
+async def get_summary(doc_id: str):
+    summary_path = RAG_STORE_ROOT / doc_id / "narrative_summary.json"
+    if not summary_path.exists():
+        raise HTTPException(404, "Narrative summary not yet generated")
+    with open(summary_path) as f:
+        return json.load(f)
+
+
+@app.post("/api/documents/{doc_id}/summarize")
+async def trigger_summary(doc_id: str, background_tasks: BackgroundTasks):
+    doc_dir = RAG_STORE_ROOT / doc_id
+    if not doc_dir.is_dir():
+        raise HTTPException(404, f"Document {doc_id!r} not found")
+    summary_path = doc_dir / "narrative_summary.json"
+    if summary_path.exists():
+        return {"status": "already_exists"}
+    _processing_status[doc_id] = {
+        "current_stage": "narrative_summary", "status": "running",
+        "message": "Generating Narrative Summary…", "ts": time.time(), "done": False,
+    }
+    background_tasks.add_task(_run_summarize_only, doc_id)
+    return {"status": "generating"}
+
+
+def _run_summarize_only(doc_id: str) -> None:
+    try:
+        _generate_narrative_summary(doc_id)
+        _emit(doc_id, "narrative_summary", "done", "Summary ready")
+    except Exception as exc:
+        _emit(doc_id, "narrative_summary", "error", str(exc))
 
 
 @app.get("/api/config/presets")
@@ -276,8 +573,16 @@ def _run_full_pipeline(pdf_path: str, doc_id_hint: Optional[str]) -> None:
         _emit(_id, "vector_index", "running")
         vim = VectorIndexManager(store, em, rag_config.vector_index)
         vim.build_all(overwrite=True)
+        # Don't mark done yet — summary generation follows
+        _processing_status[_id].update({"current_stage": "vector_index", "status": "complete"})
 
-        _emit(_id, "vector_index", "done", f"Ready: {_id}")
+        # Stage 7 — narrative summary (LLM call, may take 30–60 s)
+        _emit(_id, "narrative_summary", "running", "Generating with GPT-4o…")
+        try:
+            _generate_narrative_summary(_id)
+            _emit(_id, "narrative_summary", "done", f"Ready: {_id}")
+        except Exception as exc:
+            _emit(_id, "narrative_summary", "error", f"Summary failed (doc is still queryable): {exc}")
 
     except Exception as exc:
         tb = traceback.format_exc()
@@ -440,4 +745,6 @@ async def query_endpoint(request: QueryRequest):
             )
         raise HTTPException(500, err)
 
-    return _serialize_response(response)
+    result = _serialize_response(response)
+    result["doc_id"] = request.doc_id
+    return result
