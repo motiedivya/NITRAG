@@ -10,6 +10,10 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 
+def _cap_figsize(w: float, h: float, max_w: float = 15.0, max_h: float = 12.0):
+    return (min(max_w, w), min(max_h, h))
+
+
 def read_json(path: Union[str, Path]) -> Dict[str, Any]:
     path = Path(path)
     if not path.exists():
@@ -66,12 +70,19 @@ class IndexingEvaluationManager:
         "temporal": ["manifest.json", "docs.parquet", "postings.parquet"],
         "layout_spatial": ["manifest.json", "docs.parquet", "postings.parquet"],
         "minhash_lsh": ["manifest.json", "docs.parquet", "signatures.parquet", "buckets.parquet", "candidate_pairs.parquet"],
+        # new indexes
+        "sentence_inverted": ["manifest.json", "docs.parquet", "postings.parquet", "vocab.parquet"],
+        "numeric_range": ["manifest.json", "docs.parquet", "postings.parquet"],
+        "concept_cooccurrence": ["manifest.json", "docs.parquet", "postings.parquet", "vocab.parquet"],
     }
 
     NON_EMPTY_BY_TYPE = {
-        "lexical": {"bm25", "keyword_inverted", "tfidf", "phrase_ngram", "char_ngram", "fielded_lexical", "positional", "boolean_set"},
+        "lexical": {
+            "bm25", "keyword_inverted", "tfidf", "phrase_ngram", "char_ngram",
+            "fielded_lexical", "positional", "boolean_set", "sentence_inverted",
+        },
         "structural": {"metadata_inverted", "section_page", "chunk_graph", "layout_spatial", "minhash_lsh"},
-        "optional_signal": {"entity", "temporal"},
+        "optional_signal": {"entity", "temporal", "numeric_range", "concept_cooccurrence"},
     }
 
     def __init__(
@@ -423,14 +434,14 @@ class IndexingEvaluationManager:
         ).astype(float)
 
         path = self.plots_dir / "01_index_inventory_heatmap.png"
-        plt.figure(figsize=(max(11, pivot.shape[1] * 0.7), max(4.5, pivot.shape[0] * 0.45)))
+        plt.figure(figsize=_cap_figsize(max(11, pivot.shape[1] * 0.7), max(4.5, pivot.shape[0] * 0.45)))
         plt.imshow(pivot.values, aspect="auto", cmap="Greens", vmin=0, vmax=1)
         plt.colorbar(label="Exists")
         plt.xticks(range(pivot.shape[1]), pivot.columns, rotation=45, ha="right")
         plt.yticks(range(pivot.shape[0]), pivot.index)
         plt.title("Index inventory coverage")
         plt.tight_layout()
-        plt.savefig(path, dpi=170)
+        plt.savefig(path, dpi=120)
         plt.close()
         return [path]
 
@@ -449,14 +460,14 @@ class IndexingEvaluationManager:
         values = np.log1p(pivot.values.astype(float)) if metric == "total_size_bytes" else pivot.values.astype(float)
 
         path = self.plots_dir / filename
-        plt.figure(figsize=(max(11, pivot.shape[1] * 0.7), max(4.5, pivot.shape[0] * 0.45)))
+        plt.figure(figsize=_cap_figsize(max(11, pivot.shape[1] * 0.7), max(4.5, pivot.shape[0] * 0.45)))
         plt.imshow(values, aspect="auto", cmap="viridis")
         plt.colorbar(label=("log1p(value)" if metric == "total_size_bytes" else "value"))
         plt.xticks(range(pivot.shape[1]), pivot.columns, rotation=45, ha="right")
         plt.yticks(range(pivot.shape[0]), pivot.index)
         plt.title(title)
         plt.tight_layout()
-        plt.savefig(path, dpi=170)
+        plt.savefig(path, dpi=120)
         plt.close()
         return [path]
 
@@ -473,25 +484,25 @@ class IndexingEvaluationManager:
         )
 
         path = self.plots_dir / "04_index_health_score_heatmap.png"
-        plt.figure(figsize=(max(11, pivot.shape[1] * 0.7), max(4.5, pivot.shape[0] * 0.45)))
+        plt.figure(figsize=_cap_figsize(max(11, pivot.shape[1] * 0.7), max(4.5, pivot.shape[0] * 0.45)))
         plt.imshow(pivot.values, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1)
         plt.colorbar(label="Health score")
         plt.xticks(range(pivot.shape[1]), pivot.columns, rotation=45, ha="right")
         plt.yticks(range(pivot.shape[0]), pivot.index)
         plt.title("Index health score")
         plt.tight_layout()
-        plt.savefig(path, dpi=170)
+        plt.savefig(path, dpi=120)
         plt.close()
 
         by_index = scorecard.groupby("index_name")["health_score"].mean().sort_values()
         path2 = self.plots_dir / "05_mean_health_by_index.png"
-        plt.figure(figsize=(10, max(4.5, len(by_index) * 0.35)))
+        plt.figure(figsize=_cap_figsize(10, max(4.5, len(by_index) * 0.35)))
         plt.barh(by_index.index, by_index.values, color="#2563eb")
         plt.xlim(0, 1)
         plt.xlabel("Mean health score")
         plt.title("Mean index health by index type")
         plt.tight_layout()
-        plt.savefig(path2, dpi=170)
+        plt.savefig(path2, dpi=120)
         plt.close()
 
         return [path, path2]
@@ -507,7 +518,7 @@ class IndexingEvaluationManager:
         counts = counts[["error", "warning", "info"]].sort_values(["error", "warning", "info"])
 
         path = self.plots_dir / "06_suspicious_counts_by_index.png"
-        plt.figure(figsize=(10, max(4.5, len(counts) * 0.35)))
+        plt.figure(figsize=_cap_figsize(10, max(4.5, len(counts) * 0.35)))
         y = np.arange(len(counts))
         left = np.zeros(len(counts))
         colors = {"error": "#dc2626", "warning": "#f59e0b", "info": "#64748b"}
@@ -520,7 +531,7 @@ class IndexingEvaluationManager:
         plt.title("Suspicious index findings")
         plt.legend()
         plt.tight_layout()
-        plt.savefig(path, dpi=170)
+        plt.savefig(path, dpi=120)
         plt.close()
         return [path]
 
@@ -533,7 +544,7 @@ class IndexingEvaluationManager:
         if pivot.empty:
             return []
         path = self.plots_dir / "07_vocab_size_heatmap.png"
-        fig, ax = plt.subplots(figsize=(max(11, pivot.shape[1] * 0.7), max(4.5, pivot.shape[0] * 0.45)))
+        fig, ax = plt.subplots(figsize=_cap_figsize(max(11, pivot.shape[1] * 0.7), max(4.5, pivot.shape[0] * 0.45)))
         values = np.log1p(pivot.values.astype(float))
         im = ax.imshow(values, aspect="auto", cmap="Blues")
         fig.colorbar(im, ax=ax, label="log1p(vocab_rows)")
@@ -549,7 +560,7 @@ class IndexingEvaluationManager:
                             color="white" if values[i, j] > values.max() * 0.7 else "black")
         ax.set_title("Vocabulary size (unique terms) per index per strategy")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
@@ -560,12 +571,12 @@ class IndexingEvaluationManager:
         if avg.empty:
             return []
         path = self.plots_dir / "08_bytes_per_doc_by_index.png"
-        fig, ax = plt.subplots(figsize=(10, max(4.5, len(avg) * 0.35)))
+        fig, ax = plt.subplots(figsize=_cap_figsize(10, max(4.5, len(avg) * 0.35)))
         ax.barh(avg.index, avg.values / 1024, color="#7c3aed")
         ax.set_xlabel("Avg KB per document")
         ax.set_title("Storage cost per document per index type")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
@@ -578,7 +589,7 @@ class IndexingEvaluationManager:
             return []
         avg = m.groupby("index_name")["vocab_fan_out"].mean().sort_values()
         path = self.plots_dir / "09_vocab_fan_out_by_index.png"
-        fig, axes = plt.subplots(1, 2, figsize=(14, max(4.5, len(avg) * 0.35)))
+        fig, axes = plt.subplots(1, 2, figsize=_cap_figsize(14, max(4.5, len(avg) * 0.35)))
 
         axes[0].barh(avg.index, avg.values, color="#0891b2")
         axes[0].set_xlabel("Avg postings per vocab term")
@@ -594,7 +605,7 @@ class IndexingEvaluationManager:
 
         fig.suptitle("Index compactness metrics")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 

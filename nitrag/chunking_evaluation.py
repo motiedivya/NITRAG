@@ -11,6 +11,10 @@ import matplotlib.pyplot as plt
 import pyarrow.parquet as pq
 
 
+def _cap_figsize(w: float, h: float, max_w: float = 15.0, max_h: float = 12.0):
+    return (min(w, max_w), min(h, max_h))
+
+
 class ChunkingEvaluationManager:
     """
     First-stage chunking evaluator.
@@ -143,7 +147,7 @@ class ChunkingEvaluationManager:
         if total == 0:
             return 0.0
         probs = counts[counts > 0] / total
-        return float(-np.sum(probs * np.log2(probs)))
+        return float(max(0.0, -np.sum(probs * np.log2(probs))))
 
     # ------------------------------------------------------------------
     # Element helpers
@@ -388,7 +392,7 @@ class ChunkingEvaluationManager:
         plt.xlabel("Chunk count")
         plt.title("Chunk count by strategy")
         plt.tight_layout()
-        plt.savefig(path, dpi=170)
+        plt.savefig(path, dpi=120)
         plt.close()
         paths.append(path)
 
@@ -400,13 +404,13 @@ class ChunkingEvaluationManager:
 
             # 02 — boxplot
             path = self.plots_dir / "02_token_length_boxplot.png"
-            plt.figure(figsize=(max(11, len(labels) * 0.75), 6))
-            plt.boxplot(data, labels=labels, showfliers=False)
+            plt.figure(figsize=_cap_figsize(max(11, len(labels) * 0.75), 6))
+            plt.boxplot(data, tick_labels=labels, showfliers=False)
             plt.xticks(rotation=45, ha="right")
             plt.ylabel("Tokens per chunk")
             plt.title("Token length distribution by strategy (box)")
             plt.tight_layout()
-            plt.savefig(path, dpi=170)
+            plt.savefig(path, dpi=120)
             plt.close()
             paths.append(path)
 
@@ -415,7 +419,7 @@ class ChunkingEvaluationManager:
             ncols = 2
             nrows = math.ceil(len(strategies) / ncols)
             path = self.plots_dir / "03_token_length_histograms.png"
-            fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(12, max(4, nrows * 3.2)))
+            fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=_cap_figsize(12, max(4, nrows * 3.2)))
             axes = np.asarray(axes).reshape(-1)
             for ax, s in zip(axes, strategies):
                 vals = lengths_df.loc[lengths_df["strategy"] == s, "token_length"].dropna()
@@ -428,14 +432,14 @@ class ChunkingEvaluationManager:
                 ax.axis("off")
             fig.suptitle("Token length histograms", y=1.0)
             fig.tight_layout()
-            fig.savefig(path, dpi=170)
+            fig.savefig(path, dpi=120)
             plt.close(fig)
             paths.append(path)
 
             # 10 — violin plot
             if len(data) > 0:
                 path = self.plots_dir / "10_token_length_violin.png"
-                fig, ax = plt.subplots(figsize=(max(11, len(labels) * 0.75), 6))
+                fig, ax = plt.subplots(figsize=_cap_figsize(max(11, len(labels) * 0.75), 6))
                 parts = ax.violinplot(data, positions=range(1, len(data) + 1), showmedians=True, showextrema=True)
                 for pc in parts["bodies"]:
                     pc.set_facecolor("#6366f1")
@@ -445,14 +449,14 @@ class ChunkingEvaluationManager:
                 ax.set_ylabel("Tokens per chunk")
                 ax.set_title("Token length distribution by strategy (violin)")
                 fig.tight_layout()
-                fig.savefig(path, dpi=170)
+                fig.savefig(path, dpi=120)
                 plt.close(fig)
                 paths.append(path)
 
             # 09 — cumulative distribution (CDF)
             path = self.plots_dir / "09_token_length_cdf.png"
             fig, ax = plt.subplots(figsize=(11, 6))
-            cmap = plt.cm.get_cmap("tab20", len(labels))
+            cmap = plt.get_cmap("tab20", len(labels))
             for i, (s, arr) in enumerate(zip(labels, data)):
                 sorted_arr = np.sort(arr)
                 cdf = np.arange(1, len(sorted_arr) + 1) / len(sorted_arr)
@@ -465,7 +469,7 @@ class ChunkingEvaluationManager:
             ax.set_title("Chunk-length CDF by strategy")
             ax.legend(fontsize=7, ncol=2)
             fig.tight_layout()
-            fig.savefig(path, dpi=170)
+            fig.savefig(path, dpi=120)
             plt.close(fig)
             paths.append(path)
 
@@ -482,7 +486,7 @@ class ChunkingEvaluationManager:
         plt.title("Coverage, overlap, and missing-token profile")
         plt.legend(loc="lower right", fontsize=8)
         plt.tight_layout()
-        plt.savefig(path, dpi=170)
+        plt.savefig(path, dpi=120)
         plt.close()
         paths.append(path)
 
@@ -497,7 +501,7 @@ class ChunkingEvaluationManager:
         if existing:
             heat = metrics_df.set_index("strategy")[existing].fillna(0)
             path = self.plots_dir / "05_boundary_alignment_heatmap.png"
-            plt.figure(figsize=(max(11, len(existing) * 1.25), max(4.5, len(heat) * 0.45)))
+            plt.figure(figsize=_cap_figsize(max(11, len(existing) * 1.25), max(4.5, len(heat) * 0.45)))
             plt.imshow(heat.values, aspect="auto", cmap="viridis")
             plt.colorbar(label="Percent")
             plt.xticks(range(heat.shape[1]), heat.columns, rotation=45, ha="right")
@@ -508,7 +512,7 @@ class ChunkingEvaluationManager:
                     plt.text(j, i, f"{heat.values[i, j]:.0f}", ha="center", va="center",
                              fontsize=8, color="white" if heat.values[i, j] < 55 else "black")
             plt.tight_layout()
-            plt.savefig(path, dpi=170)
+            plt.savefig(path, dpi=120)
             plt.close()
             paths.append(path)
 
@@ -526,7 +530,7 @@ class ChunkingEvaluationManager:
         ax2.set_xlabel("Page-crossing chunks (%)")
         ax1.set_title("Redundancy and page crossing")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         paths.append(path)
 
@@ -536,7 +540,7 @@ class ChunkingEvaluationManager:
                 index="strategy", columns="page_number", values="coverage_pct", aggfunc="mean", fill_value=0,
             )
             path = self.plots_dir / "07_page_coverage_heatmap.png"
-            plt.figure(figsize=(max(10, pivot.shape[1] * 0.5), max(4.5, pivot.shape[0] * 0.45)))
+            plt.figure(figsize=_cap_figsize(max(10, pivot.shape[1] * 0.5), max(4.5, pivot.shape[0] * 0.45)))
             plt.imshow(pivot.values, aspect="auto", cmap="magma", vmin=0, vmax=100)
             plt.colorbar(label="Coverage %")
             plt.xticks(range(pivot.shape[1]), pivot.columns)
@@ -544,7 +548,7 @@ class ChunkingEvaluationManager:
             plt.xlabel("Page number")
             plt.title("Per-page token coverage by strategy")
             plt.tight_layout()
-            plt.savefig(path, dpi=170)
+            plt.savefig(path, dpi=120)
             plt.close()
             paths.append(path)
 
@@ -570,7 +574,7 @@ class ChunkingEvaluationManager:
             ax.set_title("Chunk size category distribution by strategy")
             ax.legend(title="Token range", fontsize=8, loc="lower right")
             fig.tight_layout()
-            fig.savefig(path, dpi=170)
+            fig.savefig(path, dpi=120)
             plt.close(fig)
             paths.append(path)
 
@@ -595,7 +599,7 @@ class ChunkingEvaluationManager:
             ax.set_ylabel("Shannon entropy (bits)")
             ax.set_title("Length diversity: Gini vs entropy\n(colour = coverage %)")
             fig.tight_layout()
-            fig.savefig(path, dpi=170)
+            fig.savefig(path, dpi=120)
             plt.close(fig)
             paths.append(path)
 
@@ -613,7 +617,7 @@ class ChunkingEvaluationManager:
             ax.set_title("Spread of chunk lengths: IQR vs Std Dev")
             ax.legend()
             fig.tight_layout()
-            fig.savefig(path, dpi=170)
+            fig.savefig(path, dpi=120)
             plt.close(fig)
             paths.append(path)
 

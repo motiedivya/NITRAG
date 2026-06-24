@@ -10,6 +10,10 @@ import numpy as np
 import pandas as pd
 
 
+def _cap_figsize(w: float, h: float, max_w: float = 15.0, max_h: float = 12.0):
+    return (min(max_w, w), min(max_h, h))
+
+
 def ensure_dir(path: Union[str, Path]) -> Path:
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
@@ -328,14 +332,14 @@ class RerankingEvaluationManager:
                 fill_value=0,
             )
             path = self.plots_dir / "05_keyword_hit_heatmap.png"
-            plt.figure(figsize=(max(10, pivot.shape[1] * 1.2), max(4.5, pivot.shape[0] * 0.4)))
+            plt.figure(figsize=_cap_figsize(max(10, pivot.shape[1] * 1.2), max(4.5, pivot.shape[0] * 0.4)))
             plt.imshow(pivot.values, aspect="auto", cmap="viridis")
             plt.colorbar(label="Keyword hit rate")
             plt.xticks(range(pivot.shape[1]), pivot.columns, rotation=45, ha="right")
             plt.yticks(range(pivot.shape[0]), pivot.index)
             plt.title("Keyword hit rate by retriever and reranker")
             plt.tight_layout()
-            plt.savefig(path, dpi=170)
+            plt.savefig(path, dpi=120)
             plt.close()
             paths.append(path)
 
@@ -364,7 +368,7 @@ class RerankingEvaluationManager:
         path = self.plots_dir / "07_rank_movement_histogram.png"
         ncols = min(3, len(rerankers))
         nrows = (len(rerankers) + ncols - 1) // ncols
-        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(ncols * 4.5, nrows * 3.5), squeeze=False)
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=_cap_figsize(ncols * 4.5, nrows * 3.5), squeeze=False)
         axes_flat = axes.reshape(-1)
         for i, name in enumerate(sorted(rerankers)):
             ax = axes_flat[i]
@@ -377,7 +381,7 @@ class RerankingEvaluationManager:
             ax.axis("off")
         fig.suptitle("Rank movement distribution per reranker")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
@@ -391,7 +395,7 @@ class RerankingEvaluationManager:
             return []
         data = summary_df.set_index("reranker")[metric_cols].fillna(0)
         path = self.plots_dir / "08_multi_metric_heatmap.png"
-        fig, ax = plt.subplots(figsize=(max(10, len(metric_cols) * 1.0), max(4.5, len(data) * 0.45)))
+        fig, ax = plt.subplots(figsize=_cap_figsize(max(10, len(metric_cols) * 1.0), max(4.5, len(data) * 0.45)))
         im = ax.imshow(data.values, aspect="auto", cmap="YlGn", vmin=0, vmax=1)
         fig.colorbar(im, ax=ax, label="Score (0–1)")
         ax.set_xticks(range(len(metric_cols)))
@@ -404,7 +408,7 @@ class RerankingEvaluationManager:
                         color="black" if data.values[i, j] < 0.7 else "white")
         ax.set_title("Multi-metric comparison across rerankers")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
@@ -427,19 +431,19 @@ class RerankingEvaluationManager:
         ax.set_ylabel("Quality score")
         ax.set_title("Latency vs quality per reranker\n(colour = Spearman ρ — low = more restructuring)")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
     def _plot_bar(self, df: pd.DataFrame, metric: str, filename: str, title: str) -> Path:
         d = df.sort_values(metric, ascending=True)
         path = self.plots_dir / filename
-        plt.figure(figsize=(10, max(4.5, len(d) * 0.35)))
+        plt.figure(figsize=_cap_figsize(10, max(4.5, len(d) * 0.35)))
         plt.barh(d["reranker"], d[metric].fillna(0), color="#2563eb")
         plt.xlabel(metric)
         plt.title(title)
         plt.tight_layout()
-        plt.savefig(path, dpi=170)
+        plt.savefig(path, dpi=120)
         plt.close()
         return path
 

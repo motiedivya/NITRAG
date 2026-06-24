@@ -11,6 +11,10 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 
+def _cap_figsize(w: float, h: float, max_w: float = 15.0, max_h: float = 12.0):
+    return (min(max_w, w), min(max_h, h))
+
+
 def safe_json_loads(value: Any) -> Any:
     if value is None:
         return None
@@ -366,7 +370,7 @@ class ChunkMetadataEnrichmentEvaluationManager:
             return []
 
         path = self.plots_dir / "01_quality_score_distribution.png"
-        fig, axes = plt.subplots(1, 2, figsize=(14, max(5, len(labels) * 0.5)))
+        fig, axes = plt.subplots(1, 2, figsize=_cap_figsize(14, max(5, len(labels) * 0.5)))
 
         # Violin
         ax = axes[0]
@@ -381,14 +385,14 @@ class ChunkMetadataEnrichmentEvaluationManager:
 
         # Box
         ax = axes[1]
-        ax.boxplot(data, labels=labels, showfliers=True)
+        ax.boxplot(data, tick_labels=labels, showfliers=True)
         ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=9)
         ax.set_ylabel("Clinical quality score")
         ax.set_title("Quality score distribution (box)")
 
         fig.suptitle("Chunk clinical quality score by strategy", y=1.02)
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
@@ -406,7 +410,7 @@ class ChunkMetadataEnrichmentEvaluationManager:
 
         ncols = 2
         nrows = (len(valid) + 1) // 2
-        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(14, max(4, nrows * 3.5)))
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=_cap_figsize(14, max(4, nrows * 3.5)))
         axes_flat = np.asarray(axes).reshape(-1)
 
         for i, (col, lbl) in enumerate(valid):
@@ -423,7 +427,7 @@ class ChunkMetadataEnrichmentEvaluationManager:
 
         fig.suptitle("Enrichment metric comparison by strategy")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
@@ -435,7 +439,7 @@ class ChunkMetadataEnrichmentEvaluationManager:
             return []
 
         path = self.plots_dir / "03_flag_prevalence_heatmap.png"
-        fig, ax = plt.subplots(figsize=(max(11, pivot.shape[1] * 1.1), max(4.5, pivot.shape[0] * 0.5)))
+        fig, ax = plt.subplots(figsize=_cap_figsize(max(11, pivot.shape[1] * 1.1), max(4.5, pivot.shape[0] * 0.5)))
         im = ax.imshow(pivot.values, aspect="auto", cmap="YlOrRd", vmin=0, vmax=100)
         fig.colorbar(im, ax=ax, label="% of chunks with flag=True")
         ax.set_xticks(range(pivot.shape[1]))
@@ -449,7 +453,7 @@ class ChunkMetadataEnrichmentEvaluationManager:
                         ha="center", va="center", fontsize=8,
                         color="white" if pivot.values[i, j] > 60 else "black")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
@@ -461,7 +465,7 @@ class ChunkMetadataEnrichmentEvaluationManager:
             return []
 
         path = self.plots_dir / "04_schema_completeness_heatmap.png"
-        fig, ax = plt.subplots(figsize=(max(14, pivot.shape[1] * 0.8), max(4.5, pivot.shape[0] * 0.5)))
+        fig, ax = plt.subplots(figsize=_cap_figsize(max(14, pivot.shape[1] * 0.8), max(4.5, pivot.shape[0] * 0.5)))
         im = ax.imshow(pivot.values, aspect="auto", cmap="RdYlGn", vmin=0, vmax=100)
         fig.colorbar(im, ax=ax, label="Non-null coverage %")
         ax.set_xticks(range(pivot.shape[1]))
@@ -475,7 +479,7 @@ class ChunkMetadataEnrichmentEvaluationManager:
                         ha="center", va="center", fontsize=7,
                         color="white" if pivot.values[i, j] < 40 else "black")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
@@ -490,8 +494,8 @@ class ChunkMetadataEnrichmentEvaluationManager:
         pivot_pct = pivot.div(totals, axis=0) * 100
 
         path = self.plots_dir / "05_entity_type_distribution.png"
-        cmap = plt.cm.get_cmap("tab20", len(pivot_pct.columns))
-        fig, ax = plt.subplots(figsize=(11, max(4.5, len(pivot_pct) * 0.5)))
+        cmap = plt.get_cmap("tab20", len(pivot_pct.columns))
+        fig, ax = plt.subplots(figsize=_cap_figsize(11, max(4.5, len(pivot_pct) * 0.5)))
         left = np.zeros(len(pivot_pct))
         for i, col in enumerate(pivot_pct.columns):
             ax.barh(pivot_pct.index, pivot_pct[col], left=left, color=cmap(i), label=col)
@@ -500,7 +504,7 @@ class ChunkMetadataEnrichmentEvaluationManager:
         ax.set_title("Entity type distribution per strategy")
         ax.legend(fontsize=7, loc="lower right", ncol=2)
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
@@ -528,7 +532,7 @@ class ChunkMetadataEnrichmentEvaluationManager:
         ax.set_ylabel("Avg clinical quality score")
         ax.set_title("Quality score vs entity density\n(colour = entity-bearing chunk %)")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 

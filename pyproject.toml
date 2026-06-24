@@ -12,3 +12,20 @@ dependencies = [
     "pymupdf>=1.27.2.3",
     "tiktoken>=0.13.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["nitrag"]
+omit = ["tests/*"]

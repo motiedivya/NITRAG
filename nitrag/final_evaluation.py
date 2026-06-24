@@ -9,6 +9,10 @@ import numpy as np
 import pandas as pd
 
 from .rag_diagnostics_manager import RAGDiagnosticsManager
+
+
+def _cap_figsize(w: float, h: float, max_w: float = 15.0, max_h: float = 12.0):
+    return (min(max_w, w), min(max_h, h))
 from .reranking_evaluation import RerankingEvaluationManager
 
 
@@ -345,14 +349,14 @@ class FinalEvaluationManager:
                 fill_value=0,
             )
             path = self.plots_dir / "03_best_pipeline_score_heatmap.png"
-            plt.figure(figsize=(max(10, pivot.shape[1] * 1.2), max(4.5, pivot.shape[0] * 0.45)))
+            plt.figure(figsize=_cap_figsize(max(10, pivot.shape[1] * 1.2), max(4.5, pivot.shape[0] * 0.45)))
             plt.imshow(pivot.values, aspect="auto", cmap="viridis")
             plt.colorbar(label="Best final score")
             plt.xticks(range(pivot.shape[1]), pivot.columns, rotation=45, ha="right")
             plt.yticks(range(pivot.shape[0]), pivot.index)
             plt.title("Best pipeline score by chunk strategy and retriever")
             plt.tight_layout()
-            plt.savefig(path, dpi=170)
+            plt.savefig(path, dpi=120)
             plt.close()
             paths.append(path)
 
@@ -380,7 +384,7 @@ class FinalEvaluationManager:
         path = self.plots_dir / "05_foundation_vs_quality_scatter.png"
         fig, ax = plt.subplots(figsize=(9, 6))
         strategies = pipeline_df["chunk_strategy"].unique()
-        cmap = plt.cm.get_cmap("tab10", len(strategies))
+        cmap = plt.get_cmap("tab10", len(strategies))
         color_map = {s: cmap(i) for i, s in enumerate(strategies)}
         for _, row in pipeline_df.iterrows():
             ax.scatter(row["foundation_score"], row["answer_quality_score"],
@@ -392,7 +396,7 @@ class FinalEvaluationManager:
         ax.set_ylabel("Answer quality score (retrieval + reranking)")
         ax.set_title("Foundation quality vs retrieval quality per pipeline\n(each dot = one pipeline configuration)")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
@@ -407,7 +411,7 @@ class FinalEvaluationManager:
             + top["reranker"].astype(str)
         )
         path = self.plots_dir / "06_latency_breakdown_stacked_bar.png"
-        fig, ax = plt.subplots(figsize=(11, max(5, len(top) * 0.4)))
+        fig, ax = plt.subplots(figsize=_cap_figsize(11, max(5, len(top) * 0.4)))
         colors = {"retrieval_latency_ms": "#2563eb", "rerank_latency_ms": "#dc2626"}
         labels = {"retrieval_latency_ms": "Retrieval", "rerank_latency_ms": "Reranking"}
         left = np.zeros(len(top))
@@ -419,7 +423,7 @@ class FinalEvaluationManager:
         ax.set_title(f"Latency breakdown — top {top_n} pipelines by final score")
         ax.legend(fontsize=9)
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
@@ -443,8 +447,8 @@ class FinalEvaluationManager:
             "answer_quality_score": 0.65,
         }
         path = self.plots_dir / "07_score_components_breakdown.png"
-        cmap = plt.cm.get_cmap("RdYlGn", len(component_cols))
-        fig, ax = plt.subplots(figsize=(11, max(5, len(top) * 0.4)))
+        cmap = plt.get_cmap("RdYlGn", len(component_cols))
+        fig, ax = plt.subplots(figsize=_cap_figsize(11, max(5, len(top) * 0.4)))
         left = np.zeros(len(top))
         for i, col in enumerate(component_cols):
             vals = pd.to_numeric(top[col], errors="coerce").fillna(0).values * weights.get(col, 1.0 / len(component_cols))
@@ -454,7 +458,7 @@ class FinalEvaluationManager:
         ax.set_title(f"Score component breakdown — top {top_n} pipelines")
         ax.legend(fontsize=8, loc="lower right")
         fig.tight_layout()
-        fig.savefig(path, dpi=170)
+        fig.savefig(path, dpi=120)
         plt.close(fig)
         return [path]
 
@@ -561,11 +565,11 @@ class FinalEvaluationManager:
     def _plot_bar(self, df: pd.DataFrame, label_col: str, value_col: str, filename: str, title: str) -> Path:
         d = df.sort_values(value_col, ascending=True)
         path = self.plots_dir / filename
-        plt.figure(figsize=(11, max(4.5, len(d) * 0.35)))
+        plt.figure(figsize=_cap_figsize(11, max(4.5, len(d) * 0.35)))
         plt.barh(d[label_col], d[value_col], color="#2563eb")
         plt.xlabel(value_col)
         plt.title(title)
         plt.tight_layout()
-        plt.savefig(path, dpi=170)
+        plt.savefig(path, dpi=120)
         plt.close()
         return path

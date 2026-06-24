@@ -13,6 +13,10 @@ import pyarrow.parquet as pq
 import matplotlib.pyplot as plt
 
 
+def _cap_figsize(w: float, h: float, max_w: float = 15.0, max_h: float = 12.0):
+    return (min(max_w, w), min(max_h, h))
+
+
 def safe_json_loads(s: Any) -> Any:
     if s is None:
         return None
@@ -563,13 +567,13 @@ class RAGDiagnosticsManager:
 
         d = df.sort_values("chunk_count", ascending=True)
 
-        plt.figure(figsize=(10, max(4, len(d) * 0.45)))
+        plt.figure(figsize=_cap_figsize(10, max(4, len(d) * 0.45)))
         plt.barh(d["strategy"], d["chunk_count"])
         plt.xlabel("Chunk count")
         plt.ylabel("Chunk strategy")
         plt.title("Chunk count by strategy")
         plt.tight_layout()
-        plt.savefig(path, dpi=160)
+        plt.savefig(path, dpi=120)
         plt.close()
 
         return path
@@ -595,13 +599,13 @@ class RAGDiagnosticsManager:
         if not data:
             return path
 
-        plt.figure(figsize=(max(10, len(labels) * 0.7), 6))
-        plt.boxplot(data, labels=labels, showfliers=False)
+        plt.figure(figsize=_cap_figsize(max(10, len(labels) * 0.7), 6))
+        plt.boxplot(data, tick_labels=labels, showfliers=False)
         plt.xticks(rotation=45, ha="right")
         plt.ylabel("Token length")
         plt.title("Token length distribution by chunk strategy")
         plt.tight_layout()
-        plt.savefig(path, dpi=160)
+        plt.savefig(path, dpi=120)
         plt.close()
 
         return path
@@ -621,7 +625,7 @@ class RAGDiagnosticsManager:
             fill_value=0,
         )
 
-        plt.figure(figsize=(max(10, pivot.shape[1] * 0.9), max(5, pivot.shape[0] * 0.45)))
+        plt.figure(figsize=_cap_figsize(max(10, pivot.shape[1] * 0.9), max(5, pivot.shape[0] * 0.45)))
         plt.imshow(pivot.values, aspect="auto")
         plt.colorbar(label="Coverage %")
         plt.xticks(range(pivot.shape[1]), pivot.columns, rotation=45, ha="right")
@@ -633,7 +637,7 @@ class RAGDiagnosticsManager:
                 plt.text(j, i, f"{pivot.values[i, j]:.0f}", ha="center", va="center", fontsize=8)
 
         plt.tight_layout()
-        plt.savefig(path, dpi=160)
+        plt.savefig(path, dpi=120)
         plt.close()
 
         return path
@@ -667,7 +671,7 @@ class RAGDiagnosticsManager:
         plt.title("Clinical quality score distribution")
         plt.legend(fontsize=8)
         plt.tight_layout()
-        plt.savefig(path, dpi=160)
+        plt.savefig(path, dpi=120)
         plt.close()
 
         return path
@@ -686,12 +690,12 @@ class RAGDiagnosticsManager:
                 d = d.sort_values("vocab_size", ascending=True)
 
                 path = self.plots_dir / "index_vocab_size.png"
-                plt.figure(figsize=(10, max(4, len(d) * 0.45)))
+                plt.figure(figsize=_cap_figsize(10, max(4, len(d) * 0.45)))
                 plt.barh(d["label"], d["vocab_size"])
                 plt.xlabel("Vocabulary size")
                 plt.title("Index vocabulary size")
                 plt.tight_layout()
-                plt.savefig(path, dpi=160)
+                plt.savefig(path, dpi=120)
                 plt.close()
                 paths.append(path)
 
@@ -702,12 +706,12 @@ class RAGDiagnosticsManager:
                 d = d.sort_values("postings_count", ascending=True)
 
                 path = self.plots_dir / "index_postings_count.png"
-                plt.figure(figsize=(10, max(4, len(d) * 0.45)))
+                plt.figure(figsize=_cap_figsize(10, max(4, len(d) * 0.45)))
                 plt.barh(d["label"], d["postings_count"])
                 plt.xlabel("Postings count")
                 plt.title("Index postings count")
                 plt.tight_layout()
-                plt.savefig(path, dpi=160)
+                plt.savefig(path, dpi=120)
                 plt.close()
                 paths.append(path)
 
@@ -745,7 +749,7 @@ class RAGDiagnosticsManager:
 
             path = self.plots_dir / f"retrieval_{metric}_heatmap.png"
 
-            plt.figure(figsize=(max(10, pivot.shape[1] * 1.2), max(5, pivot.shape[0] * 0.45)))
+            plt.figure(figsize=_cap_figsize(max(10, pivot.shape[1] * 1.2), max(5, pivot.shape[0] * 0.45)))
             plt.imshow(pivot.values, aspect="auto")
             plt.colorbar(label=metric)
             plt.xticks(range(pivot.shape[1]), pivot.columns, rotation=45, ha="right")
@@ -757,7 +761,7 @@ class RAGDiagnosticsManager:
                     plt.text(j, i, f"{pivot.values[i, j]:.2f}", ha="center", va="center", fontsize=8)
 
             plt.tight_layout()
-            plt.savefig(path, dpi=160)
+            plt.savefig(path, dpi=120)
             plt.close()
 
             paths.append(path)

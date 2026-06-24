@@ -393,7 +393,7 @@ class DiversityMMRReranker(BaseRerankerStrategy):
             best["original_rank"] = results.index(next(r for r in results if result_key(r) == result_key(best))) + 1
             best["original_score"] = safe_float(best.get("score"), 0.0)
             best["reranker_name"] = self.name
-            best["rerank_score"] = round(best_score, 6)
+            best["rerank_score"] = round(max(0.0, best_score), 6)
             selected.append(best)
 
         return selected
@@ -549,6 +549,384 @@ class RerankerManager:
         return current[:top_k] if top_k else current
 
 
+class EntityCoverageReranker(BaseRerankerStrategy):
+    """
+    Reranks by how many of the query's content terms are present among the
+    chunk's enriched entities.
+
+    Rationale: chunks that name the *exact entities* the query asks about
+    are almost always more relevant than chunks that merely contain the same
+    tokens in passing.  Entity matching via entities_json is more precise
+    than raw token overlap because it filters out stop-word noise.
+
+    Score = retrieval_weight * normalised_retrieval_score
+            + entity_weight * entity_coverage_ratio
+    """
+
+    name = "entity_coverage"
+    description = "Reranks by query entity coverage in enriched chunk entities. Rewards chunks that name the exact queried entities."
+
+    def __init__(
+        self,
+        retrieval_weight: float = 0.45,
+        entity_weight: float = 0.55,
+    ):
+        self.retrieval_weight = retrieval_weight
+        self.entity_weight = entity_weight
+
+    def rerank(
+        self,
+        *,
+        query: str,
+        results: List[Dict[str, Any]],
+        store=None,
+        top_k: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        if not results:
+            return results
+        query_terms = set(t for t in simple_tokenize(query) if len(t) > 2)
+        retrieval_norms = normalize_scores(results)
+
+        out = []
+        for rank, result in enumerate(results, start=1):
+            key = result_key(result)
+            entities = result.get("entities") or []
+            if not isinstance(entities, list):
+                import json as _json
+                try:
+                    entities = _json.loads(entities) if isinstance(entities, str) else []
+                except Exception:
+                    entities = []
+
+            entity_terms: set = set()
+            for e in entities:
+                if isinstance(e, dict):
+                    for field in ("text", "normalized_value"):
+                        val = str(e.get(field) or "")
+                        entity_terms.update(t for t in simple_tokenize(val) if len(t) > 2)
+
+            coverage = len(query_terms & entity_terms) / max(1, len(query_terms)) if query_terms else 0.0
+            score = (
+                self.retrieval_weight * retrieval_norms.get(key, 0.0)
+                + self.entity_weight * coverage
+            )
+            r = dict(result)
+            r["original_rank"] = rank
+            r["original_score"] = safe_float(result.get("score"), 0.0)
+            r["reranker_name"] = self.name
+            r["rerank_score"] = round(score, 6)
+            r["rerank_features"] = {
+                "retrieval_norm": retrieval_norms.get(key, 0.0),
+                "entity_coverage": round(coverage, 4),
+                "matched_entity_terms": sorted(query_terms & entity_terms),
+            }
+            out.append(r)
+
+        out.sort(key=lambda r: r["rerank_score"], reverse=True)
+        return out[:top_k] if top_k else out
+
+
+class SectionPriorityReranker(BaseRerankerStrategy):
+    """
+    Boosts chunks from high-signal clinical sections; penalises administrative
+    and demographic sections.
+
+    High-signal sections carry the clinical conclusions of a note (Assessment,
+    Plan, Impression, Findings, Discharge Diagnosis).  Low-signal sections
+    (Demographics, Header, Footer, Administrative) rarely contain the kind of
+    clinical content a RAG system needs to answer questions.
+    """
+
+    name = "section_priority"
+    description = "Boosts chunks from high-signal sections (Assessment, Plan, Impression) and penalises low-signal administrative sections."
+
+    HIGH_SIGNAL: Dict[str, float] = {
+        "assessment": 0.25,
+        "assessment and plan": 0.25,
+        "plan": 0.20,
+        "impression": 0.22,
+        "findings": 0.20,
+        "diagnosis": 0.22,
+        "diagnoses": 0.22,
+        "discharge diagnosis": 0.22,
+        "discharge summary": 0.18,
+        "history of present illness": 0.15,
+        "hpi": 0.15,
+        "physical examination": 0.12,
+        "physical exam": 0.12,
+        "results": 0.15,
+        "laboratory results": 0.18,
+        "lab results": 0.18,
+        "recommendations": 0.18,
+        "problem list": 0.20,
+        "active problems": 0.20,
+    }
+    LOW_SIGNAL: Dict[str, float] = {
+        "demographics": -0.15,
+        "administrative": -0.15,
+        "header": -0.12,
+        "footer": -0.12,
+        "signature": -0.10,
+        "attestation": -0.10,
+        "page header": -0.08,
+        "page footer": -0.08,
+    }
+
+    def rerank(
+        self,
+        *,
+        query: str,
+        results: List[Dict[str, Any]],
+        store=None,
+        top_k: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        if not results:
+            return results
+        retrieval_norms = normalize_scores(results)
+
+        out = []
+        for rank, result in enumerate(results, start=1):
+            key = result_key(result)
+            section = str(result.get("primary_section") or "").lower().strip()
+            section_bonus = self.HIGH_SIGNAL.get(section, 0.0) + self.LOW_SIGNAL.get(section, 0.0)
+            base = retrieval_norms.get(key, 0.0)
+            score = max(0.0, min(1.0, base + section_bonus))
+
+            r = dict(result)
+            r["original_rank"] = rank
+            r["original_score"] = safe_float(result.get("score"), 0.0)
+            r["reranker_name"] = self.name
+            r["rerank_score"] = round(score, 6)
+            r["rerank_features"] = {
+                "retrieval_norm": base,
+                "section": section,
+                "section_bonus": round(section_bonus, 4),
+            }
+            out.append(r)
+
+        out.sort(key=lambda r: r["rerank_score"], reverse=True)
+        return out[:top_k] if top_k else out
+
+
+class BM25RescoreReranker(BaseRerankerStrategy):
+    """
+    Re-scores candidates using BM25 computed over the candidate pool only.
+
+    Global BM25 IDF is calibrated against the full corpus — rare terms get
+    high IDF even when they appear in every candidate.  Computing BM25 over
+    just the candidate pool gives local IDF that reflects discriminativeness
+    *within the retrieved set*, which better separates relevant from
+    irrelevant candidates after heterogeneous retrieval (fusion results,
+    entity queries, etc.).
+    """
+
+    name = "bm25_rescore"
+    description = "Re-computes BM25 over the candidate pool only (local IDF), removing global corpus bias from the final ranking."
+
+    def __init__(self, k1: float = 1.2, b: float = 0.75):
+        self.k1 = k1
+        self.b = b
+
+    def rerank(
+        self,
+        *,
+        query: str,
+        results: List[Dict[str, Any]],
+        store=None,
+        top_k: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        if not results:
+            return results
+        q_terms = [t for t in simple_tokenize(query) if len(t) > 1]
+        if not q_terms:
+            return results[:top_k] if top_k else results
+
+        texts = [str(r.get("text_preview") or "") for r in results]
+        doc_tfs = [Counter(simple_tokenize(t)) for t in texts]
+        doc_lens = [sum(tf.values()) for tf in doc_tfs]
+        avgdl = max(1, sum(doc_lens) / len(doc_lens))
+        n = len(results)
+
+        # local document frequency
+        local_df: Counter = Counter()
+        for tf in doc_tfs:
+            for term in q_terms:
+                if term in tf:
+                    local_df[term] += 1
+
+        scores = []
+        for idx, tf in enumerate(doc_tfs):
+            dl = doc_lens[idx]
+            score = 0.0
+            for term in q_terms:
+                freq = tf.get(term, 0)
+                if not freq:
+                    continue
+                df = local_df.get(term, 0)
+                idf = math.log(1 + (n - df + 0.5) / (df + 0.5))
+                numer = freq * (self.k1 + 1)
+                denom = freq + self.k1 * (1 - self.b + self.b * dl / avgdl)
+                score += idf * numer / max(denom, 1e-9)
+            scores.append(score)
+
+        max_score = max(scores) if scores else 1.0
+        out = []
+        for rank, (result, score) in enumerate(zip(results, scores), start=1):
+            r = dict(result)
+            r["original_rank"] = rank
+            r["original_score"] = safe_float(result.get("score"), 0.0)
+            r["reranker_name"] = self.name
+            r["rerank_score"] = round(score / max(max_score, 1e-9), 6)
+            r["rerank_features"] = {"local_bm25_raw": round(score, 4)}
+            out.append(r)
+
+        out.sort(key=lambda r: r["rerank_score"], reverse=True)
+        return out[:top_k] if top_k else out
+
+
+class NegationFilterReranker(BaseRerankerStrategy):
+    """
+    Demotes chunks where the query's key terms appear primarily in negated
+    clinical entity contexts.
+
+    Different from NegationAwareBM25Retriever (which operates at retrieval
+    time): this reranker can be applied to the output of ANY retriever and
+    uses the enriched entities_json negation flags directly.
+
+    A chunk gets a demotion proportional to:
+      (# negated query-term tokens) / (# total query-term tokens in chunk)
+    """
+
+    name = "negation_filter"
+    description = "Demotes chunks where query key terms appear in negated entity contexts (e.g. 'no fever', 'denies chest pain')."
+
+    def __init__(
+        self,
+        retrieval_weight: float = 0.70,
+        negation_penalty: float = 0.40,
+    ):
+        self.retrieval_weight = retrieval_weight
+        self.negation_penalty = negation_penalty
+
+    def rerank(
+        self,
+        *,
+        query: str,
+        results: List[Dict[str, Any]],
+        store=None,
+        top_k: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        if not results:
+            return results
+        query_terms = set(t for t in simple_tokenize(query) if len(t) > 2)
+        retrieval_norms = normalize_scores(results)
+
+        out = []
+        for rank, result in enumerate(results, start=1):
+            key = result_key(result)
+            base = retrieval_norms.get(key, 0.0)
+            penalty = 0.0
+
+            if result.get("contains_negation") and query_terms:
+                entities = result.get("entities") or []
+                if not isinstance(entities, list):
+                    try:
+                        import json as _j
+                        entities = _j.loads(entities) if isinstance(entities, str) else []
+                    except Exception:
+                        entities = []
+
+                negated_terms: set = set()
+                for e in entities:
+                    if isinstance(e, dict) and (e.get("negated") or e.get("is_negated")):
+                        for field in ("text", "normalized_value"):
+                            val = str(e.get(field) or "")
+                            negated_terms.update(t for t in simple_tokenize(val) if len(t) > 2)
+
+                overlap = query_terms & negated_terms
+                penalty = len(overlap) / len(query_terms) if overlap else 0.0
+
+            score = max(0.0, base - penalty * self.negation_penalty)
+            r = dict(result)
+            r["original_rank"] = rank
+            r["original_score"] = safe_float(result.get("score"), 0.0)
+            r["reranker_name"] = self.name
+            r["rerank_score"] = round(score, 6)
+            r["rerank_features"] = {
+                "retrieval_norm": base,
+                "negation_penalty_applied": round(penalty * self.negation_penalty, 4),
+            }
+            out.append(r)
+
+        out.sort(key=lambda r: r["rerank_score"], reverse=True)
+        return out[:top_k] if top_k else out
+
+
+class PositionBiasCorrectionReranker(BaseRerankerStrategy):
+    """
+    Counteracts position bias from the upstream retriever.
+
+    Most retrievers over-weight documents near the top of their ranked list
+    (position bias).  This reranker blends the retrieval score with an
+    inverse-position correction so that a result at rank 5 with a strong
+    signal can overtake a result at rank 1 that scored only slightly higher.
+
+    correction_score = 1 / (rank + correction_k)
+    final_score = retrieval_weight * norm_score + correction_weight * correction_score
+    """
+
+    name = "position_bias_correction"
+    description = "Blends retrieval score with an inverse-rank correction to surface strong mid-rank results buried by position bias."
+
+    def __init__(
+        self,
+        retrieval_weight: float = 0.60,
+        correction_weight: float = 0.40,
+        correction_k: int = 20,
+    ):
+        self.retrieval_weight = retrieval_weight
+        self.correction_weight = correction_weight
+        self.correction_k = correction_k
+
+    def rerank(
+        self,
+        *,
+        query: str,
+        results: List[Dict[str, Any]],
+        store=None,
+        top_k: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        if not results:
+            return results
+        retrieval_norms = normalize_scores(results)
+
+        out = []
+        for rank, result in enumerate(results, start=1):
+            key = result_key(result)
+            base = retrieval_norms.get(key, 0.0)
+            correction = 1.0 / (rank + self.correction_k)
+            score = self.retrieval_weight * base + self.correction_weight * correction
+
+            r = dict(result)
+            r["original_rank"] = rank
+            r["original_score"] = safe_float(result.get("score"), 0.0)
+            r["reranker_name"] = self.name
+            r["rerank_score"] = round(score, 6)
+            r["rerank_features"] = {
+                "retrieval_norm": base,
+                "correction_score": round(correction, 6),
+            }
+            out.append(r)
+
+        out.sort(key=lambda r: r["rerank_score"], reverse=True)
+        return out[:top_k] if top_k else out
+
+
 def register_default_rerankers(manager: RerankerManager) -> None:
     manager.register_reranker(ScorePassthroughReranker())
     manager.register_reranker(KeywordOverlapReranker())
@@ -560,3 +938,8 @@ def register_default_rerankers(manager: RerankerManager) -> None:
     manager.register_reranker(DiversityMMRReranker())
     manager.register_reranker(DeduplicateReranker())
     manager.register_reranker(HybridWeightedReranker())
+    manager.register_reranker(EntityCoverageReranker())
+    manager.register_reranker(SectionPriorityReranker())
+    manager.register_reranker(BM25RescoreReranker())
+    manager.register_reranker(NegationFilterReranker())
+    manager.register_reranker(PositionBiasCorrectionReranker())

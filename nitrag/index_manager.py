@@ -1517,6 +1517,312 @@ class IndexManager:
         return json.loads(path.read_text(encoding="utf-8"))
 
 
+class SentenceInvertedIndexStrategy(BaseIndexStrategy):
+    """
+    Sentence-level inverted index.
+
+    Splits each chunk into sentences and indexes every term with its sentence
+    position.  Downstream retrievers can score by how many matching sentences
+    a chunk contains, enabling extractive-QA style highlighting.
+
+    Parquet files
+    ─────────────
+    docs.parquet     — one row per chunk (same schema as BM25 docs)
+    postings.parquet — term, doc_idx, sentence_idx, tf_in_sentence
+    vocab.parquet    — term, df (# docs containing term), sentence_df
+    manifest.json
+    """
+
+    name = "sentence_inverted"
+    description = "Fine-grained inverted index at sentence granularity for extractive QA and sentence-level scoring."
+
+    _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+    def build(
+        self,
+        *,
+        store,
+        chunk_strategy_name: str,
+        chunks: List[Dict[str, Any]],
+        output_dir: Path,
+        overwrite: bool = True,
+    ) -> IndexBuildResult:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        docs = []
+        postings = []
+        doc_df: Counter = Counter()
+        sentence_df: Counter = Counter()
+        vocab_rows = []
+
+        for doc_idx, row in enumerate(chunks):
+            text = chunk_text(store, row)
+            docs.append(base_doc_record(row=row, doc_idx=doc_idx, chunk_strategy_name=chunk_strategy_name, text=text))
+
+            sentences = self._SENT_SPLIT.split(text.strip()) or [text]
+            seen_terms: set = set()
+            for sent_idx, sentence in enumerate(sentences):
+                tokens = simple_tokenize(sentence)
+                tf = Counter(tokens)
+                for term, freq in tf.items():
+                    postings.append({
+                        "term": term,
+                        "doc_idx": doc_idx,
+                        "sentence_idx": sent_idx,
+                        "tf_in_sentence": int(freq),
+                    })
+                    seen_terms.add(term)
+                    sentence_df[term] += 1
+            for term in seen_terms:
+                doc_df[term] += 1
+
+        for term, df in doc_df.items():
+            vocab_rows.append({"term": term, "df": int(df), "sentence_df": int(sentence_df[term])})
+
+        write_parquet(docs, output_dir / "docs.parquet")
+        write_parquet(postings, output_dir / "postings.parquet")
+        write_parquet(vocab_rows, output_dir / "vocab.parquet")
+
+        stats = {
+            "index_name": self.name,
+            "chunk_strategy_name": chunk_strategy_name,
+            "n_docs": len(chunks),
+            "vocab_size": len(vocab_rows),
+            "postings_count": len(postings),
+        }
+        write_json(stats, output_dir / "manifest.json")
+        return IndexBuildResult(index_name=self.name, chunk_strategy_name=chunk_strategy_name, output_dir=output_dir, stats=stats)
+
+
+class NumericRangeIndexStrategy(BaseIndexStrategy):
+    """
+    Numeric value index for range-based medical queries.
+
+    Extracts all numeric values from chunk text and enriched entity JSON,
+    attaches inferred unit and magnitude class (vital, lab, dose, generic),
+    and stores them as postings keyed by (context_type, unit_bucket).
+
+    Parquet files
+    ─────────────
+    docs.parquet      — one row per chunk
+    postings.parquet  — doc_idx, numeric_value, unit, context_type,
+                        magnitude_class, surrounding_text (32 chars each side)
+    manifest.json
+
+    Use cases
+    ─────────
+    - "show me patients with glucose > 200"
+    - "find chunks with HR > 100 bpm"
+    - "doses above 500 mg"
+    """
+
+    name = "numeric_range"
+    description = "Indexes numeric values (vitals, lab results, dosages) with unit and context for range-based medical queries."
+
+    _NUM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([a-zA-Z/%]+)?")
+    _UNIT_MAP = {
+        "mg": "dose", "mcg": "dose", "g": "dose", "ml": "dose", "l": "dose",
+        "mmhg": "vital", "bpm": "vital", "rpm": "vital",
+        "mgdl": "lab", "mmoll": "lab", "iu": "lab", "iul": "lab",
+        "%": "lab", "meql": "lab",
+        "celsius": "vital", "fahrenheit": "vital", "c": "vital", "f": "vital",
+        "kg": "demographic", "lb": "demographic", "lbs": "demographic",
+        "cm": "demographic", "m": "demographic", "in": "demographic",
+    }
+
+    def build(
+        self,
+        *,
+        store,
+        chunk_strategy_name: str,
+        chunks: List[Dict[str, Any]],
+        output_dir: Path,
+        overwrite: bool = True,
+    ) -> IndexBuildResult:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        docs = []
+        postings = []
+
+        for doc_idx, row in enumerate(chunks):
+            text = chunk_text(store, row)
+            docs.append(base_doc_record(row=row, doc_idx=doc_idx, chunk_strategy_name=chunk_strategy_name, text=text))
+
+            seen: set = set()
+            for m in self._NUM_RE.finditer(text):
+                try:
+                    value = float(m.group(1))
+                except ValueError:
+                    continue
+                raw_unit = (m.group(2) or "").lower().strip()
+                unit_clean = re.sub(r"[^a-z%/]", "", raw_unit)
+                context_type = self._UNIT_MAP.get(unit_clean, "generic")
+                mag_class = self._magnitude_class(value)
+                surrounding_start = max(0, m.start() - 32)
+                surrounding = text[surrounding_start: m.end() + 32]
+                key = (doc_idx, round(value, 3), unit_clean)
+                if key not in seen:
+                    seen.add(key)
+                    postings.append({
+                        "doc_idx": doc_idx,
+                        "numeric_value": float(value),
+                        "unit": unit_clean,
+                        "context_type": context_type,
+                        "magnitude_class": mag_class,
+                        "surrounding_text": surrounding[:80],
+                    })
+
+            entities = safe_json_loads(row.get("entities_json"))
+            if isinstance(entities, list):
+                for entity in entities:
+                    if not isinstance(entity, dict):
+                        continue
+                    norm = str(entity.get("normalized_value") or entity.get("text") or "")
+                    m = self._NUM_RE.search(norm)
+                    if not m:
+                        continue
+                    try:
+                        value = float(m.group(1))
+                    except ValueError:
+                        continue
+                    etype = str(entity.get("type") or entity.get("entity_type") or "entity")
+                    context_type = {"vital": "vital", "lab_result": "lab"}.get(etype, "entity")
+                    key = (doc_idx, round(value, 3), etype)
+                    if key not in seen:
+                        seen.add(key)
+                        postings.append({
+                            "doc_idx": doc_idx,
+                            "numeric_value": float(value),
+                            "unit": etype,
+                            "context_type": context_type,
+                            "magnitude_class": self._magnitude_class(value),
+                            "surrounding_text": norm[:80],
+                        })
+
+        write_parquet(docs, output_dir / "docs.parquet")
+        write_parquet(postings, output_dir / "postings.parquet")
+
+        stats = {
+            "index_name": self.name,
+            "chunk_strategy_name": chunk_strategy_name,
+            "n_docs": len(chunks),
+            "postings_count": len(postings),
+            "context_type_counts": dict(Counter(p["context_type"] for p in postings)),
+        }
+        write_json(stats, output_dir / "manifest.json")
+        return IndexBuildResult(index_name=self.name, chunk_strategy_name=chunk_strategy_name, output_dir=output_dir, stats=stats)
+
+    @staticmethod
+    def _magnitude_class(value: float) -> str:
+        if value < 1:
+            return "sub_unit"
+        if value < 10:
+            return "single_digit"
+        if value < 100:
+            return "tens"
+        if value < 1000:
+            return "hundreds"
+        return "thousands_plus"
+
+
+class ConceptCooccurrenceIndexStrategy(BaseIndexStrategy):
+    """
+    Entity-type co-occurrence index.
+
+    For each chunk records every ordered pair of entity types that co-occur
+    (e.g., medication + diagnosis, vital + lab_result).  A retriever can use
+    this to find chunks that link two clinical concepts — useful for questions
+    like "what medications are associated with hypertension in these notes".
+
+    Parquet files
+    ─────────────
+    docs.parquet      — one row per chunk
+    postings.parquet  — doc_idx, type_a, type_b, pair_count
+    vocab.parquet     — pair (type_a|type_b), pair_df, total_count
+    manifest.json
+    """
+
+    name = "concept_cooccurrence"
+    description = "Indexes entity-type co-occurrence pairs per chunk for relationship and association queries."
+
+    def build(
+        self,
+        *,
+        store,
+        chunk_strategy_name: str,
+        chunks: List[Dict[str, Any]],
+        output_dir: Path,
+        overwrite: bool = True,
+    ) -> IndexBuildResult:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        docs = []
+        postings = []
+        pair_df: Counter = Counter()
+        pair_total: Counter = Counter()
+
+        for doc_idx, row in enumerate(chunks):
+            text = chunk_text(store, row)
+            docs.append(base_doc_record(row=row, doc_idx=doc_idx, chunk_strategy_name=chunk_strategy_name, text=text))
+
+            entities = safe_json_loads(row.get("entities_json"))
+            entity_types: List[str] = []
+            if isinstance(entities, list):
+                for e in entities:
+                    if isinstance(e, dict):
+                        etype = str(e.get("type") or e.get("entity_type") or "").strip()
+                        if etype:
+                            entity_types.append(etype)
+
+            # Also add flag-derived types for chunks without entities_json
+            flag_types = truthy_flag_names(row)
+            flag_prefix_map = {
+                "contains_medication": "medication_candidate",
+                "contains_diagnosis": "diagnosis_or_problem_candidate",
+                "contains_vital": "vital",
+                "contains_lab": "lab_result",
+                "contains_date": "date",
+                "contains_imaging": "imaging_candidate",
+                "contains_procedure": "procedure_candidate",
+            }
+            for flag in flag_types:
+                synthetic = flag_prefix_map.get(flag)
+                if synthetic and synthetic not in entity_types:
+                    entity_types.append(synthetic)
+
+            type_counts = Counter(entity_types)
+            seen_pairs: set = set()
+            types_unique = sorted(set(entity_types))
+            for i, ta in enumerate(types_unique):
+                for tb in types_unique[i + 1:]:
+                    pair_key = f"{ta}|{tb}"
+                    count = min(type_counts[ta], type_counts[tb])
+                    postings.append({"doc_idx": doc_idx, "type_a": ta, "type_b": tb, "pair_count": int(count)})
+                    pair_total[pair_key] += count
+                    if pair_key not in seen_pairs:
+                        seen_pairs.add(pair_key)
+                        pair_df[pair_key] += 1
+
+        vocab_rows = [
+            {"pair": pair, "pair_df": int(df), "total_count": int(pair_total[pair])}
+            for pair, df in pair_df.items()
+        ]
+
+        write_parquet(docs, output_dir / "docs.parquet")
+        write_parquet(postings, output_dir / "postings.parquet")
+        write_parquet(vocab_rows, output_dir / "vocab.parquet")
+
+        stats = {
+            "index_name": self.name,
+            "chunk_strategy_name": chunk_strategy_name,
+            "n_docs": len(chunks),
+            "unique_pairs": len(vocab_rows),
+            "postings_count": len(postings),
+        }
+        write_json(stats, output_dir / "manifest.json")
+        return IndexBuildResult(index_name=self.name, chunk_strategy_name=chunk_strategy_name, output_dir=output_dir, stats=stats)
+
+
 def register_default_indexers(manager: IndexManager) -> None:
     manager.register_indexer(BM25IndexStrategy())
     manager.register_indexer(KeywordInvertedIndexStrategy())
@@ -1533,3 +1839,6 @@ def register_default_indexers(manager: IndexManager) -> None:
     manager.register_indexer(TemporalIndexStrategy())
     manager.register_indexer(LayoutSpatialIndexStrategy())
     manager.register_indexer(MinHashLSHIndexStrategy())
+    manager.register_indexer(SentenceInvertedIndexStrategy())
+    manager.register_indexer(NumericRangeIndexStrategy())
+    manager.register_indexer(ConceptCooccurrenceIndexStrategy())

@@ -2258,6 +2258,525 @@ class RetrieverManager:
         return dict(self._errors)
 
 
+class QueryExpansionBM25RetrieverStrategy(BaseRetrieverStrategy):
+    """
+    BM25 retrieval with medical query expansion.
+
+    Expands query terms using a built-in medical abbreviation dictionary and
+    simple morphological variants (plurals, verb forms), then runs BM25 on
+    the union of original + expanded terms.  Results from all query variants
+    are fused with Reciprocal Rank Fusion.
+
+    Covers: MI→myocardial infarction, HTN→hypertension, DM→diabetes mellitus,
+    COPD, CHF, UTI, PE, DVT, CAD, CABG, PCI, BPH, GERD, CVA, TIA, and more.
+    """
+
+    name = "query_expansion_bm25"
+    description = "BM25 retrieval with built-in medical abbreviation expansion and RRF fusion across query variants."
+
+    MEDICAL_ABBREVIATIONS: Dict[str, List[str]] = {
+        "mi": ["myocardial infarction", "heart attack"],
+        "htn": ["hypertension", "high blood pressure"],
+        "dm": ["diabetes mellitus", "diabetes"],
+        "dm2": ["type 2 diabetes", "diabetes mellitus type 2"],
+        "t2dm": ["type 2 diabetes", "diabetes mellitus"],
+        "t1dm": ["type 1 diabetes", "insulin dependent diabetes"],
+        "copd": ["chronic obstructive pulmonary disease"],
+        "chf": ["congestive heart failure", "heart failure"],
+        "uti": ["urinary tract infection"],
+        "pe": ["pulmonary embolism"],
+        "dvt": ["deep vein thrombosis"],
+        "cad": ["coronary artery disease"],
+        "cabg": ["coronary artery bypass graft"],
+        "pci": ["percutaneous coronary intervention", "stent"],
+        "bph": ["benign prostatic hyperplasia"],
+        "gerd": ["gastroesophageal reflux disease", "acid reflux"],
+        "cva": ["cerebrovascular accident", "stroke"],
+        "tia": ["transient ischemic attack", "mini stroke"],
+        "afib": ["atrial fibrillation"],
+        "af": ["atrial fibrillation"],
+        "chemo": ["chemotherapy"],
+        "bp": ["blood pressure"],
+        "hr": ["heart rate"],
+        "rr": ["respiratory rate"],
+        "temp": ["temperature"],
+        "spo2": ["oxygen saturation"],
+        "o2": ["oxygen"],
+        "wbc": ["white blood cell", "leukocyte"],
+        "rbc": ["red blood cell", "erythrocyte"],
+        "hgb": ["hemoglobin"],
+        "hct": ["hematocrit"],
+        "plt": ["platelet"],
+        "cr": ["creatinine"],
+        "bun": ["blood urea nitrogen"],
+        "k": ["potassium"],
+        "na": ["sodium"],
+        "hba1c": ["hemoglobin a1c", "glycated hemoglobin"],
+        "ldl": ["low density lipoprotein", "bad cholesterol"],
+        "hdl": ["high density lipoprotein", "good cholesterol"],
+        "bnp": ["b-type natriuretic peptide", "brain natriuretic peptide"],
+        "ekg": ["electrocardiogram", "ecg"],
+        "ecg": ["electrocardiogram"],
+        "echo": ["echocardiogram"],
+        "ct": ["computed tomography", "cat scan"],
+        "mri": ["magnetic resonance imaging"],
+        "cxr": ["chest x-ray", "chest radiograph"],
+        "icu": ["intensive care unit"],
+        "ed": ["emergency department", "emergency room"],
+        "or": ["operating room", "surgery"],
+        "po": ["by mouth", "oral"],
+        "iv": ["intravenous"],
+        "im": ["intramuscular"],
+        "bid": ["twice daily", "twice a day"],
+        "tid": ["three times daily"],
+        "qd": ["once daily", "every day"],
+        "qid": ["four times daily"],
+        "prn": ["as needed"],
+    }
+
+    def __init__(self, base_bm25: Optional[BM25RetrieverStrategy] = None):
+        self.base_bm25 = base_bm25 or BM25RetrieverStrategy()
+
+    def retrieve(
+        self,
+        *,
+        store,
+        index_root_dir: Path,
+        query: str,
+        chunk_strategy_name: Optional[str] = None,
+        top_k: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        return_text_chars: int = 1200,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        query_variants = self._expand_query(query)
+        ranked_lists = []
+        for variant in query_variants:
+            try:
+                results = self.base_bm25.retrieve(
+                    store=store,
+                    index_root_dir=index_root_dir,
+                    query=variant,
+                    chunk_strategy_name=chunk_strategy_name,
+                    top_k=top_k * 2,
+                    filters=filters,
+                    return_text_chars=return_text_chars,
+                )
+                if results:
+                    ranked_lists.append(results)
+            except Exception:
+                pass
+        if not ranked_lists:
+            return []
+        fused = reciprocal_rank_fusion(ranked_lists, top_k=top_k, retriever_name=self.name)
+        for r in fused:
+            r["expanded_variants"] = query_variants
+        return fused
+
+    def _expand_query(self, query: str) -> List[str]:
+        variants = [query]
+        tokens = simple_tokenize(query)
+        expansions_added = set()
+        for token in tokens:
+            for expansion in self.MEDICAL_ABBREVIATIONS.get(token.lower(), []):
+                if expansion not in expansions_added:
+                    variants.append(re.sub(r"\b" + re.escape(token) + r"\b", expansion, query, flags=re.IGNORECASE))
+                    expansions_added.add(expansion)
+        return variants[:5]  # cap at 5 variants to avoid exploding latency
+
+
+class EntityCentricFusionRetrieverStrategy(BaseRetrieverStrategy):
+    """
+    Entity-centric retrieval with RRF fusion.
+
+    Extracts candidate entity terms from the query (capitalized words,
+    known medical terms, multi-word phrases), retrieves separately for each
+    via the entity index, then fuses with RRF.  Outperforms plain BM25 for
+    queries like "metformin side effects in patients with renal failure"
+    where several distinct entities carry the query intent.
+    """
+
+    name = "entity_centric_fusion"
+    description = "Extracts entity terms from the query, retrieves per entity via entity index, fuses with RRF."
+
+    # Patterns that suggest a medical entity in the query
+    _ENTITY_HINT_RE = re.compile(
+        r"\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*"  # capitalized multi-word
+        r"|(?:mg|mcg|mL|mg/dL|mmol/L|IU/L|bpm|mmHg)\b"  # units → numeric context
+        r")\b"
+    )
+
+    def __init__(self, base_bm25: Optional[BM25RetrieverStrategy] = None):
+        self.base_bm25 = base_bm25 or BM25RetrieverStrategy()
+
+    def retrieve(
+        self,
+        *,
+        store,
+        index_root_dir: Path,
+        query: str,
+        chunk_strategy_name: Optional[str] = None,
+        top_k: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        return_text_chars: int = 1200,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        if not chunk_strategy_name:
+            raise ValueError("entity_centric_fusion requires chunk_strategy_name")
+
+        entity_terms = self._extract_entity_terms(query)
+        ranked_lists = []
+
+        # Always include a baseline BM25 run
+        try:
+            baseline = self.base_bm25.retrieve(
+                store=store, index_root_dir=index_root_dir, query=query,
+                chunk_strategy_name=chunk_strategy_name, top_k=top_k * 2,
+                filters=filters, return_text_chars=return_text_chars,
+            )
+            if baseline:
+                ranked_lists.append(baseline)
+        except Exception:
+            pass
+
+        # Per-entity entity-index lookups
+        entity_index_dir = index_root_dir / chunk_strategy_name / "entity"
+        if entity_index_dir.exists():
+            docs = read_parquet(entity_index_dir / "docs.parquet")
+            postings = read_parquet(entity_index_dir / "postings.parquet")
+            if docs and postings:
+                docs_by_idx = {int(d["doc_idx"]): d for d in docs}
+                postings_by_term: Dict[str, List[int]] = defaultdict(list)
+                for p in postings:
+                    term_key = str(p.get("entity_normalized") or p.get("term") or "").lower()
+                    if term_key:
+                        postings_by_term[term_key].append(int(p["doc_idx"]))
+
+                for term in entity_terms:
+                    term_lower = term.lower()
+                    matching_doc_idxs = postings_by_term.get(term_lower, [])
+                    if not matching_doc_idxs:
+                        # fuzzy: check partial matches
+                        matching_doc_idxs = [
+                            idx for t, idxs in postings_by_term.items()
+                            if term_lower in t or t in term_lower
+                            for idx in idxs
+                        ][:50]
+                    if not matching_doc_idxs:
+                        continue
+                    entity_results = []
+                    seen = set()
+                    for doc_idx in matching_doc_idxs:
+                        if doc_idx in seen:
+                            continue
+                        seen.add(doc_idx)
+                        row = docs_by_idx.get(doc_idx)
+                        if row and passes_filters(row, filters):
+                            entity_results.append(make_result(
+                                row=row, score=1.0 / (1 + len(entity_results)),
+                                retriever_name=self.name, query=query, store=store,
+                                return_text_chars=return_text_chars,
+                                extra={"matched_entity_term": term},
+                            ))
+                    if entity_results:
+                        ranked_lists.append(entity_results[:top_k * 2])
+
+        if not ranked_lists:
+            return []
+        return reciprocal_rank_fusion(ranked_lists, top_k=top_k, retriever_name=self.name)
+
+    def _extract_entity_terms(self, query: str) -> List[str]:
+        terms = []
+        # capitalized words / medical capitalized phrases
+        for m in self._ENTITY_HINT_RE.finditer(query):
+            t = m.group(1).strip()
+            if len(t) > 2:
+                terms.append(t)
+        # also include all tokens >= 4 chars (likely content words)
+        for tok in simple_tokenize(query):
+            if len(tok) >= 4 and tok not in [t.lower() for t in terms]:
+                terms.append(tok)
+        return list(dict.fromkeys(terms))[:8]  # deduplicate, cap at 8
+
+
+class NumericRangeRetrieverStrategy(BaseRetrieverStrategy):
+    """
+    Numeric range retrieval from the numeric_range index.
+
+    Parses the query for numeric conditions expressed as:
+      - explicit comparisons: "> 200", "< 60", ">= 7.0", "<= 120"
+      - approximate values: "around 150", "~90"
+      - ranges: "between 70 and 120", "70–120"
+
+    Returns chunks that contain at least one numeric value satisfying ALL
+    parsed conditions.  Falls back to BM25 when no numeric conditions are found.
+    """
+
+    name = "numeric_range_retriever"
+    description = "Parses numeric conditions from the query and retrieves chunks via the numeric_range index."
+
+    _GT_RE  = re.compile(r"(?:greater than|above|over|>)\s*=?\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
+    _LT_RE  = re.compile(r"(?:less than|below|under|<)\s*=?\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
+    _GTE_RE = re.compile(r">=\s*(\d+(?:\.\d+)?)")
+    _LTE_RE = re.compile(r"<=\s*(\d+(?:\.\d+)?)")
+    _BTW_RE = re.compile(r"between\s+(\d+(?:\.\d+)?)\s+and\s+(\d+(?:\.\d+)?)", re.IGNORECASE)
+    _APPROX_RE = re.compile(r"(?:around|approximately|~)\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
+
+    def __init__(self, base_bm25: Optional[BM25RetrieverStrategy] = None):
+        self.base_bm25 = base_bm25 or BM25RetrieverStrategy()
+
+    def retrieve(
+        self,
+        *,
+        store,
+        index_root_dir: Path,
+        query: str,
+        chunk_strategy_name: Optional[str] = None,
+        top_k: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        return_text_chars: int = 1200,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        if not chunk_strategy_name:
+            raise ValueError("numeric_range_retriever requires chunk_strategy_name")
+
+        conditions = self._parse_conditions(query)
+        if not conditions:
+            # no numeric condition detected — fall back to BM25
+            return self.base_bm25.retrieve(
+                store=store, index_root_dir=index_root_dir, query=query,
+                chunk_strategy_name=chunk_strategy_name, top_k=top_k,
+                filters=filters, return_text_chars=return_text_chars,
+            )
+
+        index_dir = index_root_dir / chunk_strategy_name / "numeric_range"
+        if not index_dir.exists():
+            return self.base_bm25.retrieve(
+                store=store, index_root_dir=index_root_dir, query=query,
+                chunk_strategy_name=chunk_strategy_name, top_k=top_k,
+                filters=filters, return_text_chars=return_text_chars,
+            )
+
+        docs = read_parquet(index_dir / "docs.parquet")
+        postings = read_parquet(index_dir / "postings.parquet")
+        if not docs:
+            return []
+
+        docs_by_idx = {int(d["doc_idx"]): d for d in docs}
+        matching: Dict[int, float] = defaultdict(float)
+        for p in postings:
+            value = float(p.get("numeric_value") or 0)
+            if self._satisfies_all(value, conditions):
+                doc_idx = int(p["doc_idx"])
+                # score: prefer exact/central matches
+                matching[doc_idx] += 1.0
+
+        results = []
+        for doc_idx, score in sorted(matching.items(), key=lambda x: -x[1]):
+            row = docs_by_idx.get(doc_idx)
+            if row and passes_filters(row, filters):
+                results.append(make_result(
+                    row=row, score=score, retriever_name=self.name, query=query,
+                    store=store, return_text_chars=return_text_chars,
+                    extra={"numeric_conditions": conditions},
+                ))
+        return results[:top_k]
+
+    def _parse_conditions(self, query: str) -> List[Dict[str, float]]:
+        conditions = []
+        for m in self._GTE_RE.finditer(query):
+            conditions.append({"op": "gte", "value": float(m.group(1))})
+        for m in self._LTE_RE.finditer(query):
+            conditions.append({"op": "lte", "value": float(m.group(1))})
+        for m in self._GT_RE.finditer(query):
+            if not any(c["op"] == "gte" and c["value"] == float(m.group(1)) for c in conditions):
+                conditions.append({"op": "gt", "value": float(m.group(1))})
+        for m in self._LT_RE.finditer(query):
+            if not any(c["op"] == "lte" and c["value"] == float(m.group(1)) for c in conditions):
+                conditions.append({"op": "lt", "value": float(m.group(1))})
+        for m in self._BTW_RE.finditer(query):
+            conditions.append({"op": "gte", "value": float(m.group(1))})
+            conditions.append({"op": "lte", "value": float(m.group(2))})
+        for m in self._APPROX_RE.finditer(query):
+            v = float(m.group(1))
+            margin = v * 0.15
+            conditions.append({"op": "gte", "value": v - margin})
+            conditions.append({"op": "lte", "value": v + margin})
+        return conditions
+
+    @staticmethod
+    def _satisfies_all(value: float, conditions: List[Dict[str, float]]) -> bool:
+        for c in conditions:
+            op, threshold = c["op"], c["value"]
+            if op == "gt" and not (value > threshold):
+                return False
+            if op == "gte" and not (value >= threshold):
+                return False
+            if op == "lt" and not (value < threshold):
+                return False
+            if op == "lte" and not (value <= threshold):
+                return False
+        return True
+
+
+class NegationAwareBM25RetrieverStrategy(BaseRetrieverStrategy):
+    """
+    BM25 retrieval with negation demotion.
+
+    Runs standard BM25, then re-scores by penalising chunks where the
+    query's content words appear primarily in negated entity contexts
+    (contains_negation=True AND entity text overlaps with query terms).
+    Useful when the query is about a positive finding but many retrieved
+    chunks discuss its absence ("no fever", "denies chest pain").
+    """
+
+    name = "negation_aware_bm25"
+    description = "BM25 retrieval that demotes chunks where key query terms appear in negated clinical contexts."
+
+    def __init__(
+        self,
+        base_bm25: Optional[BM25RetrieverStrategy] = None,
+        negation_penalty: float = 0.35,
+    ):
+        self.base_bm25 = base_bm25 or BM25RetrieverStrategy()
+        self.negation_penalty = negation_penalty
+
+    def retrieve(
+        self,
+        *,
+        store,
+        index_root_dir: Path,
+        query: str,
+        chunk_strategy_name: Optional[str] = None,
+        top_k: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        return_text_chars: int = 1200,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        candidates = self.base_bm25.retrieve(
+            store=store, index_root_dir=index_root_dir, query=query,
+            chunk_strategy_name=chunk_strategy_name,
+            top_k=top_k * 3,  # over-fetch before demotion
+            filters=filters, return_text_chars=return_text_chars,
+        )
+        if not candidates:
+            return []
+
+        query_terms = set(simple_tokenize(query))
+        results = []
+        for r in candidates:
+            score = float(r.get("score") or 0)
+            penalty = self._compute_negation_penalty(r, query_terms)
+            r = dict(r)
+            r["score"] = round(score * (1.0 - penalty * self.negation_penalty), 6)
+            r["negation_penalty"] = round(penalty, 4)
+            r["retriever_name"] = self.name
+            results.append(r)
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:top_k]
+
+    @staticmethod
+    def _compute_negation_penalty(result: Dict[str, Any], query_terms: set) -> float:
+        if not result.get("contains_negation"):
+            return 0.0
+        entities = safe_json_loads(result.get("entities")) or []
+        if not isinstance(entities, list):
+            return 0.0
+        negated_terms: set = set()
+        for e in entities:
+            if not isinstance(e, dict):
+                continue
+            if bool(e.get("negated") or e.get("is_negated")):
+                text = str(e.get("text") or e.get("normalized_value") or "")
+                negated_terms.update(simple_tokenize(text))
+        overlap = query_terms & negated_terms
+        if not overlap or not query_terms:
+            return 0.0
+        # penalty proportional to fraction of query terms that are negated
+        return len(overlap) / len(query_terms)
+
+
+class ClinicalSectionScopedRetrieverStrategy(BaseRetrieverStrategy):
+    """
+    Section-scoped BM25 retrieval.
+
+    Restricts the candidate pool to chunks from high-signal clinical sections
+    before running BM25 scoring.  Falls back to unrestricted BM25 when not
+    enough section-scoped results are found.
+
+    High-signal sections (configurable): Assessment, Plan, Impression,
+    Findings, Diagnosis, Discharge Summary, History of Present Illness,
+    Physical Exam, Results, Recommendations.
+    """
+
+    name = "clinical_section_scoped"
+    description = "BM25 retrieval scoped to high-signal clinical sections; falls back to full-corpus BM25 when needed."
+
+    HIGH_SIGNAL_SECTIONS = {
+        "assessment", "assessment and plan", "plan", "impression",
+        "findings", "diagnosis", "diagnoses", "discharge summary",
+        "discharge diagnosis", "history of present illness", "hpi",
+        "physical examination", "physical exam", "exam", "results",
+        "laboratory results", "lab results", "recommendations",
+        "clinical impression", "problem list", "active problems",
+        "chief complaint", "summary", "conclusion", "conclusion and recommendations",
+    }
+
+    def __init__(
+        self,
+        base_bm25: Optional[BM25RetrieverStrategy] = None,
+        min_scoped_results: int = 3,
+        high_signal_sections: Optional[set] = None,
+    ):
+        self.base_bm25 = base_bm25 or BM25RetrieverStrategy()
+        self.min_scoped_results = min_scoped_results
+        self.high_signal_sections = high_signal_sections or self.HIGH_SIGNAL_SECTIONS
+
+    def retrieve(
+        self,
+        *,
+        store,
+        index_root_dir: Path,
+        query: str,
+        chunk_strategy_name: Optional[str] = None,
+        top_k: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        return_text_chars: int = 1200,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        # Fetch a large candidate pool first, then scope
+        candidates = self.base_bm25.retrieve(
+            store=store, index_root_dir=index_root_dir, query=query,
+            chunk_strategy_name=chunk_strategy_name,
+            top_k=top_k * 4,
+            filters=filters, return_text_chars=return_text_chars,
+        )
+        if not candidates:
+            return []
+
+        scoped = [
+            r for r in candidates
+            if str(r.get("primary_section") or "").lower().strip() in self.high_signal_sections
+        ]
+
+        if len(scoped) >= self.min_scoped_results:
+            results = scoped[:top_k]
+        else:
+            # soft blend: give section-scoped chunks a 25% boost, then take top_k
+            section_set = {id(r) for r in scoped}
+            for r in candidates:
+                if id(r) in section_set:
+                    r = dict(r)
+                    r["score"] = float(r.get("score") or 0) * 1.25
+            candidates.sort(key=lambda r: float(r.get("score") or 0), reverse=True)
+            results = candidates[:top_k]
+
+        for r in results:
+            r["retriever_name"] = self.name
+        return results
+
+
 def register_default_retrievers(manager: RetrieverManager) -> None:
     bm25 = BM25RetrieverStrategy()
     keyword = KeywordExactRetrieverStrategy()
@@ -2292,3 +2811,8 @@ def register_default_retrievers(manager: RetrieverManager) -> None:
     manager.register_retriever(ContextExpansionRetrieverStrategy())
     manager.register_retriever(GraphExpansionRetrieverStrategy())
     manager.register_retriever(CrossChunkStrategyFusionRetriever())
+    manager.register_retriever(QueryExpansionBM25RetrieverStrategy(base_bm25=bm25))
+    manager.register_retriever(EntityCentricFusionRetrieverStrategy(base_bm25=bm25))
+    manager.register_retriever(NumericRangeRetrieverStrategy(base_bm25=bm25))
+    manager.register_retriever(NegationAwareBM25RetrieverStrategy(base_bm25=bm25))
+    manager.register_retriever(ClinicalSectionScopedRetrieverStrategy(base_bm25=bm25))
