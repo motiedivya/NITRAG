@@ -346,6 +346,9 @@ class IndexingEvaluationManager:
         paths.extend(self._plot_metric_heatmap(metrics, "postings_per_doc", "03_postings_per_doc_heatmap.png", "Postings per doc"))
         paths.extend(self._plot_scorecard(scorecard))
         paths.extend(self._plot_suspicious_counts(suspicious))
+        paths.extend(self._plot_vocab_size_heatmap(metrics))
+        paths.extend(self._plot_bytes_per_doc_bar(metrics))
+        paths.extend(self._plot_vocab_fan_out_bar(metrics))
         return paths
 
     def generate_report(self) -> Dict[str, Any]:
@@ -521,6 +524,80 @@ class IndexingEvaluationManager:
         plt.close()
         return [path]
 
+    def _plot_vocab_size_heatmap(self, metrics: pd.DataFrame) -> List[Path]:
+        if metrics.empty or "vocab_rows" not in metrics.columns:
+            return []
+        pivot = metrics.pivot_table(
+            index="chunk_strategy", columns="index_name", values="vocab_rows", aggfunc="mean", fill_value=0,
+        )
+        if pivot.empty:
+            return []
+        path = self.plots_dir / "07_vocab_size_heatmap.png"
+        fig, ax = plt.subplots(figsize=(max(11, pivot.shape[1] * 0.7), max(4.5, pivot.shape[0] * 0.45)))
+        values = np.log1p(pivot.values.astype(float))
+        im = ax.imshow(values, aspect="auto", cmap="Blues")
+        fig.colorbar(im, ax=ax, label="log1p(vocab_rows)")
+        ax.set_xticks(range(pivot.shape[1]))
+        ax.set_xticklabels(pivot.columns, rotation=45, ha="right")
+        ax.set_yticks(range(pivot.shape[0]))
+        ax.set_yticklabels(pivot.index)
+        for i in range(pivot.shape[0]):
+            for j in range(pivot.shape[1]):
+                v = int(pivot.values[i, j])
+                if v > 0:
+                    ax.text(j, i, f"{v:,}", ha="center", va="center", fontsize=6,
+                            color="white" if values[i, j] > values.max() * 0.7 else "black")
+        ax.set_title("Vocabulary size (unique terms) per index per strategy")
+        fig.tight_layout()
+        fig.savefig(path, dpi=170)
+        plt.close(fig)
+        return [path]
+
+    def _plot_bytes_per_doc_bar(self, metrics: pd.DataFrame) -> List[Path]:
+        if metrics.empty or "bytes_per_doc" not in metrics.columns:
+            return []
+        avg = metrics.groupby("index_name")["bytes_per_doc"].mean().sort_values()
+        if avg.empty:
+            return []
+        path = self.plots_dir / "08_bytes_per_doc_by_index.png"
+        fig, ax = plt.subplots(figsize=(10, max(4.5, len(avg) * 0.35)))
+        ax.barh(avg.index, avg.values / 1024, color="#7c3aed")
+        ax.set_xlabel("Avg KB per document")
+        ax.set_title("Storage cost per document per index type")
+        fig.tight_layout()
+        fig.savefig(path, dpi=170)
+        plt.close(fig)
+        return [path]
+
+    def _plot_vocab_fan_out_bar(self, metrics: pd.DataFrame) -> List[Path]:
+        """vocab_fan_out = postings_rows / vocab_rows — how many (doc,pos) entries per unique term on average."""
+        if metrics.empty or "vocab_fan_out" not in metrics.columns:
+            return []
+        m = metrics[metrics["vocab_rows"] > 0]
+        if m.empty:
+            return []
+        avg = m.groupby("index_name")["vocab_fan_out"].mean().sort_values()
+        path = self.plots_dir / "09_vocab_fan_out_by_index.png"
+        fig, axes = plt.subplots(1, 2, figsize=(14, max(4.5, len(avg) * 0.35)))
+
+        axes[0].barh(avg.index, avg.values, color="#0891b2")
+        axes[0].set_xlabel("Avg postings per vocab term")
+        axes[0].set_title("Vocabulary fan-out (postings / vocab terms)")
+
+        if "bytes_per_posting" in metrics.columns:
+            bp = metrics[metrics["postings_rows"] > 0].groupby("index_name")["bytes_per_posting"].mean().sort_values()
+            axes[1].barh(bp.index, bp.values, color="#dc2626")
+            axes[1].set_xlabel("Avg bytes per posting row")
+            axes[1].set_title("Storage density (bytes per posting)")
+        else:
+            axes[1].axis("off")
+
+        fig.suptitle("Index compactness metrics")
+        fig.tight_layout()
+        fig.savefig(path, dpi=170)
+        plt.close(fig)
+        return [path]
+
     def _source_chunk_count(self, chunk_strategy: str) -> int:
         path = self.chunk_dir / f"{chunk_strategy}.parquet"
         if not path.exists():
@@ -541,6 +618,7 @@ class IndexingEvaluationManager:
         docs_rows = int(len(docs))
         postings_rows = int(len(postings))
 
+        vocab_rows = int(len(vocab))
         row = {
             "chunk_strategy": chunk_strategy,
             "index_name": index_name,
@@ -548,14 +626,16 @@ class IndexingEvaluationManager:
             "source_chunk_rows": self._source_chunk_count(chunk_strategy),
             "docs_rows": docs_rows,
             "postings_rows": postings_rows,
-            "vocab_rows": int(len(vocab)),
+            "vocab_rows": vocab_rows,
             "edges_rows": int(len(edges)),
             "signatures_rows": int(len(signatures)),
             "buckets_rows": int(len(buckets)),
             "candidate_pair_rows": int(len(candidate_pairs)),
             "total_size_bytes": int(total_bytes),
             "bytes_per_doc": float(total_bytes / max(1, docs_rows)),
+            "bytes_per_posting": float(total_bytes / max(1, postings_rows)),
             "postings_per_doc": float(postings_rows / max(1, docs_rows)),
+            "vocab_fan_out": float(postings_rows / max(1, vocab_rows)),
             "manifest_present": bool(manifest),
         }
 

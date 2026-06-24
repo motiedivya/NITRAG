@@ -359,7 +359,104 @@ class FinalEvaluationManager:
         if not stage_summary_df.empty:
             paths.append(self._plot_bar(stage_summary_df, "stage", "best_score", "04_stage_best_scores.png", "Best score by stage"))
 
+        # 05 — foundation vs quality scatter
+        if not pipeline_df.empty:
+            paths.extend(self._plot_foundation_vs_quality_scatter(pipeline_df))
+
+        # 06 — latency breakdown stacked bar for top-N pipelines
+        if not pipeline_df.empty:
+            paths.extend(self._plot_latency_breakdown_bar(pipeline_df))
+
+        # 07 — score components breakdown for top-N pipelines
+        if not pipeline_df.empty:
+            paths.extend(self._plot_score_components_breakdown(pipeline_df))
+
         return paths
+
+    def _plot_foundation_vs_quality_scatter(self, pipeline_df: pd.DataFrame) -> List[Path]:
+        need = {"foundation_score", "answer_quality_score"}
+        if not need.issubset(pipeline_df.columns):
+            return []
+        path = self.plots_dir / "05_foundation_vs_quality_scatter.png"
+        fig, ax = plt.subplots(figsize=(9, 6))
+        strategies = pipeline_df["chunk_strategy"].unique()
+        cmap = plt.cm.get_cmap("tab10", len(strategies))
+        color_map = {s: cmap(i) for i, s in enumerate(strategies)}
+        for _, row in pipeline_df.iterrows():
+            ax.scatter(row["foundation_score"], row["answer_quality_score"],
+                       color=color_map[row["chunk_strategy"]], s=60, alpha=0.7)
+        for strat, color in color_map.items():
+            ax.scatter([], [], color=color, label=strat, s=40)
+        ax.legend(fontsize=7, loc="upper left")
+        ax.set_xlabel("Foundation score (chunking + enrichment + indexing)")
+        ax.set_ylabel("Answer quality score (retrieval + reranking)")
+        ax.set_title("Foundation quality vs retrieval quality per pipeline\n(each dot = one pipeline configuration)")
+        fig.tight_layout()
+        fig.savefig(path, dpi=170)
+        plt.close(fig)
+        return [path]
+
+    def _plot_latency_breakdown_bar(self, pipeline_df: pd.DataFrame, top_n: int = 20) -> List[Path]:
+        latency_cols = [c for c in ["retrieval_latency_ms", "rerank_latency_ms"] if c in pipeline_df.columns]
+        if not latency_cols:
+            return []
+        top = pipeline_df.head(top_n).copy()
+        top["pipeline"] = (
+            top["chunk_strategy"].astype(str) + " / "
+            + top["retriever"].astype(str) + " / "
+            + top["reranker"].astype(str)
+        )
+        path = self.plots_dir / "06_latency_breakdown_stacked_bar.png"
+        fig, ax = plt.subplots(figsize=(11, max(5, len(top) * 0.4)))
+        colors = {"retrieval_latency_ms": "#2563eb", "rerank_latency_ms": "#dc2626"}
+        labels = {"retrieval_latency_ms": "Retrieval", "rerank_latency_ms": "Reranking"}
+        left = np.zeros(len(top))
+        for col in latency_cols:
+            vals = pd.to_numeric(top[col], errors="coerce").fillna(0).values
+            ax.barh(top["pipeline"], vals, left=left, color=colors.get(col, "#888"), label=labels.get(col, col))
+            left += vals
+        ax.set_xlabel("Latency (ms)")
+        ax.set_title(f"Latency breakdown — top {top_n} pipelines by final score")
+        ax.legend(fontsize=9)
+        fig.tight_layout()
+        fig.savefig(path, dpi=170)
+        plt.close(fig)
+        return [path]
+
+    def _plot_score_components_breakdown(self, pipeline_df: pd.DataFrame, top_n: int = 20) -> List[Path]:
+        component_cols = [c for c in [
+            "chunking_score", "enrichment_score", "indexing_score", "answer_quality_score",
+        ] if c in pipeline_df.columns]
+        if not component_cols:
+            return []
+        top = pipeline_df.head(top_n).copy()
+        top["pipeline"] = (
+            top["chunk_strategy"].astype(str) + " / "
+            + top["retriever"].astype(str) + " / "
+            + top["reranker"].astype(str)
+        )
+        # normalise each component to show relative share of final score
+        weights = {
+            "chunking_score": 0.35 * 0.25,
+            "enrichment_score": 0.35 * 0.25,
+            "indexing_score": 0.30 * 0.25,
+            "answer_quality_score": 0.65,
+        }
+        path = self.plots_dir / "07_score_components_breakdown.png"
+        cmap = plt.cm.get_cmap("RdYlGn", len(component_cols))
+        fig, ax = plt.subplots(figsize=(11, max(5, len(top) * 0.4)))
+        left = np.zeros(len(top))
+        for i, col in enumerate(component_cols):
+            vals = pd.to_numeric(top[col], errors="coerce").fillna(0).values * weights.get(col, 1.0 / len(component_cols))
+            ax.barh(top["pipeline"], vals, left=left, color=cmap(i), label=col.replace("_score", "").replace("_", " "))
+            left += vals
+        ax.set_xlabel("Weighted score contribution")
+        ax.set_title(f"Score component breakdown — top {top_n} pipelines")
+        ax.legend(fontsize=8, loc="lower right")
+        fig.tight_layout()
+        fig.savefig(path, dpi=170)
+        plt.close(fig)
+        return [path]
 
     def _get_retrieval_benchmark(
         self,

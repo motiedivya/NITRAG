@@ -117,6 +117,8 @@ def main() -> None:
     print(f"  Total pages        : {aug.get('total_pages', '?')}")
     print(f"  Native pages       : {aug.get('native_pages', '?')}")
     print(f"  Scanned/OCR pages  : {aug.get('scanned_ocr_pages', '?')}")
+    print(f"  Mixed pages        : {aug.get('mixed_pages', '?')}")
+    print(f"  Image-only pages   : {aug.get('image_only_pages', '?')}")
     print(f"  2-column pages     : {aug.get('two_column_pages', '?')}")
     print(f"  Total tokens       : {manifest.get('total_tokens', '?')}")
     print(f"  Total elements     : {manifest.get('total_elements', '?')}")

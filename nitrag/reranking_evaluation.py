@@ -131,7 +131,11 @@ class RerankingEvaluationManager:
                             "rerank_latency_ms": 0.0,
                             "error": None,
                             "mean_abs_rank_delta": 0.0,
+                            "max_abs_rank_delta": 0.0,
                             "top_result_changed": 0,
+                            "promoted_count": 0,
+                            "demoted_count": 0,
+                            "spearman_rho": 1.0,
                             **baseline_metrics,
                         })
 
@@ -222,7 +226,8 @@ class RerankingEvaluationManager:
             return out
 
         d = df[df["error"].isna()].copy()
-        grouped = d.groupby("reranker", dropna=False).agg(
+
+        agg_spec: Dict[str, Any] = dict(
             runs=("reranker", "size"),
             avg_result_count=("result_count", "mean"),
             avg_keyword_hit_rate=("keyword_hit_rate", "mean"),
@@ -237,7 +242,20 @@ class RerankingEvaluationManager:
             avg_delta_keyword_hit_rate=("delta_keyword_hit_rate", "mean"),
             avg_delta_mrr_page=("delta_mrr_page", "mean"),
             avg_delta_duplicate_text_ratio=("delta_duplicate_text_ratio", "mean"),
-        ).reset_index()
+        )
+        for col, key in [
+            ("avg_precision_at_1", "precision_at_1"),
+            ("avg_precision_at_3", "precision_at_3"),
+            ("avg_precision_at_5", "precision_at_5"),
+            ("avg_spearman_rho", "spearman_rho"),
+            ("avg_max_abs_rank_delta", "max_abs_rank_delta"),
+            ("avg_promoted_count", "promoted_count"),
+            ("avg_demoted_count", "demoted_count"),
+        ]:
+            if key in d.columns:
+                agg_spec[col] = (key, "mean")
+
+        grouped = d.groupby("reranker", dropna=False).agg(**agg_spec).reset_index()
 
         grouped["quality_score"] = (
             grouped["avg_keyword_hit_rate"].fillna(0) * 0.35
@@ -321,7 +339,97 @@ class RerankingEvaluationManager:
             plt.close()
             paths.append(path)
 
+        # 06 — Spearman ρ bar (how much each reranker restructures the ranking)
+        if "avg_spearman_rho" in summary_df.columns:
+            paths.append(self._plot_bar(summary_df, "avg_spearman_rho", "06_spearman_rho_by_reranker.png",
+                                        "Avg Spearman ρ vs baseline order\n(1.0 = no change, lower = more restructuring)"))
+
+        # 07 — Rank movement histogram across all benchmark rows per reranker
+        if not benchmark_df.empty and "mean_abs_rank_delta" in benchmark_df.columns:
+            paths.extend(self._plot_rank_movement_histogram(benchmark_df))
+
+        # 08 — Multi-metric heatmap: precision@k, MRR, keyword hit per reranker
+        paths.extend(self._plot_multi_metric_heatmap(summary_df))
+
+        # 09 — Latency vs quality scatter
+        if not summary_df.empty:
+            paths.extend(self._plot_latency_vs_quality_scatter(summary_df))
+
         return paths
+
+    def _plot_rank_movement_histogram(self, benchmark_df: pd.DataFrame) -> List[Path]:
+        rerankers = [r for r in benchmark_df["reranker"].unique() if r != "baseline"]
+        if not rerankers:
+            return []
+        path = self.plots_dir / "07_rank_movement_histogram.png"
+        ncols = min(3, len(rerankers))
+        nrows = (len(rerankers) + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(ncols * 4.5, nrows * 3.5), squeeze=False)
+        axes_flat = axes.reshape(-1)
+        for i, name in enumerate(sorted(rerankers)):
+            ax = axes_flat[i]
+            vals = benchmark_df.loc[benchmark_df["reranker"] == name, "mean_abs_rank_delta"].dropna()
+            if len(vals) > 0:
+                ax.hist(vals, bins=min(15, max(5, len(vals) // 2)), color="#7c3aed", edgecolor="white")
+            ax.set_title(name, fontsize=9)
+            ax.set_xlabel("Mean |rank delta|", fontsize=8)
+        for ax in axes_flat[len(rerankers):]:
+            ax.axis("off")
+        fig.suptitle("Rank movement distribution per reranker")
+        fig.tight_layout()
+        fig.savefig(path, dpi=170)
+        plt.close(fig)
+        return [path]
+
+    def _plot_multi_metric_heatmap(self, summary_df: pd.DataFrame) -> List[Path]:
+        metric_cols = [c for c in [
+            "avg_keyword_hit_rate", "avg_mrr_page",
+            "avg_precision_at_1", "avg_precision_at_3", "avg_precision_at_5",
+            "avg_expected_page_hit_at_k", "avg_page_diversity", "quality_score",
+        ] if c in summary_df.columns]
+        if not metric_cols:
+            return []
+        data = summary_df.set_index("reranker")[metric_cols].fillna(0)
+        path = self.plots_dir / "08_multi_metric_heatmap.png"
+        fig, ax = plt.subplots(figsize=(max(10, len(metric_cols) * 1.0), max(4.5, len(data) * 0.45)))
+        im = ax.imshow(data.values, aspect="auto", cmap="YlGn", vmin=0, vmax=1)
+        fig.colorbar(im, ax=ax, label="Score (0–1)")
+        ax.set_xticks(range(len(metric_cols)))
+        ax.set_xticklabels([c.replace("avg_", "") for c in metric_cols], rotation=45, ha="right", fontsize=9)
+        ax.set_yticks(range(len(data)))
+        ax.set_yticklabels(data.index, fontsize=9)
+        for i in range(len(data)):
+            for j in range(len(metric_cols)):
+                ax.text(j, i, f"{data.values[i, j]:.2f}", ha="center", va="center", fontsize=7,
+                        color="black" if data.values[i, j] < 0.7 else "white")
+        ax.set_title("Multi-metric comparison across rerankers")
+        fig.tight_layout()
+        fig.savefig(path, dpi=170)
+        plt.close(fig)
+        return [path]
+
+    def _plot_latency_vs_quality_scatter(self, summary_df: pd.DataFrame) -> List[Path]:
+        if "avg_rerank_latency_ms" not in summary_df.columns or "quality_score" not in summary_df.columns:
+            return []
+        path = self.plots_dir / "09_latency_vs_quality_scatter.png"
+        fig, ax = plt.subplots(figsize=(9, 6))
+        spearman_col = "avg_spearman_rho" if "avg_spearman_rho" in summary_df.columns else None
+        color_vals = summary_df[spearman_col].fillna(0.5) if spearman_col else pd.Series([0.5] * len(summary_df))
+        sc = ax.scatter(
+            summary_df["avg_rerank_latency_ms"], summary_df["quality_score"],
+            c=color_vals, cmap="coolwarm_r", s=80,
+        )
+        plt.colorbar(sc, ax=ax, label="Avg Spearman ρ" if spearman_col else "")
+        for _, row in summary_df.iterrows():
+            ax.annotate(row["reranker"], (row["avg_rerank_latency_ms"], row["quality_score"]),
+                        fontsize=7, xytext=(4, 4), textcoords="offset points")
+        ax.set_xlabel("Avg rerank latency (ms)")
+        ax.set_ylabel("Quality score")
+        ax.set_title("Latency vs quality per reranker\n(colour = Spearman ρ — low = more restructuring)")
+        fig.tight_layout()
+        fig.savefig(path, dpi=170)
+        plt.close(fig)
+        return [path]
 
     def _plot_bar(self, df: pd.DataFrame, metric: str, filename: str, title: str) -> Path:
         d = df.sort_values(metric, ascending=True)
@@ -379,7 +487,11 @@ class RerankingEvaluationManager:
 
         expected_page_hit = 0
         mrr = 0.0
+        precision_at_1 = 0.0
+        precision_at_3 = 0.0
+        precision_at_5 = 0.0
         if expected_pages:
+            hits_so_far = 0
             for rank, r in enumerate(results[:top_k], start=1):
                 ps = r.get("page_start")
                 pe = r.get("page_end")
@@ -388,10 +500,22 @@ class RerankingEvaluationManager:
                 if pe is None:
                     pe = ps
                 result_pages = set(range(int(ps), int(pe) + 1))
-                if result_pages & expected_pages:
-                    expected_page_hit = 1
-                    mrr = 1.0 / rank
-                    break
+                is_relevant = bool(result_pages & expected_pages)
+                if is_relevant:
+                    hits_so_far += 1
+                    if expected_page_hit == 0:
+                        expected_page_hit = 1
+                        mrr = 1.0 / rank
+                if rank == 1:
+                    precision_at_1 = float(is_relevant)
+                if rank == 3:
+                    precision_at_3 = hits_so_far / 3.0
+                if rank == 5:
+                    precision_at_5 = hits_so_far / 5.0
+            if top_k < 3:
+                precision_at_3 = hits_so_far / 3.0
+            if top_k < 5:
+                precision_at_5 = hits_so_far / 5.0
 
         return {
             "top_score": float(max(scores)),
@@ -402,6 +526,9 @@ class RerankingEvaluationManager:
             "keyword_hit_rate": float(keyword_hit_rate),
             "expected_page_hit_at_k": int(expected_page_hit),
             "mrr_page": float(mrr),
+            "precision_at_1": float(precision_at_1),
+            "precision_at_3": float(precision_at_3),
+            "precision_at_5": float(precision_at_5),
         }
 
     def _empty_metrics(self) -> Dict[str, Any]:
@@ -414,23 +541,50 @@ class RerankingEvaluationManager:
             "keyword_hit_rate": 0.0,
             "expected_page_hit_at_k": 0,
             "mrr_page": 0.0,
+            "precision_at_1": 0.0,
+            "precision_at_3": 0.0,
+            "precision_at_5": 0.0,
         }
 
     def _rank_movement(self, original: List[Dict[str, Any]], reranked: List[Dict[str, Any]]) -> Dict[str, Any]:
         original_rank = {result_identity(r): i for i, r in enumerate(original, start=1)}
         deltas = []
+        promoted = 0
+        demoted  = 0
+        signed_deltas = []
+
         for rank, r in enumerate(reranked, start=1):
             key = result_identity(r)
             if key in original_rank:
-                deltas.append(abs(original_rank[key] - rank))
+                d = original_rank[key] - rank
+                abs_d = abs(d)
+                deltas.append(abs_d)
+                signed_deltas.append(d)
+                if d > 0:
+                    promoted += 1
+                elif d < 0:
+                    demoted += 1
 
         top_changed = 0
         if original and reranked:
             top_changed = int(result_identity(original[0]) != result_identity(reranked[0]))
 
+        spearman_rho = 0.0
+        if len(signed_deltas) >= 2:
+            n = len(signed_deltas)
+            orig_ranks = np.arange(1, n + 1, dtype=float)
+            new_ranks = np.array([original_rank.get(result_identity(r), 0) for r in reranked[:n]], dtype=float)
+            # simple Spearman: 1 - 6*sum(d^2) / (n*(n^2-1))
+            d2 = np.sum((orig_ranks - new_ranks) ** 2)
+            spearman_rho = float(1.0 - 6.0 * d2 / max(1.0, n * (n * n - 1)))
+
         return {
             "mean_abs_rank_delta": float(np.mean(deltas)) if deltas else 0.0,
+            "max_abs_rank_delta": float(max(deltas)) if deltas else 0.0,
             "top_result_changed": int(top_changed),
+            "promoted_count": int(promoted),
+            "demoted_count": int(demoted),
+            "spearman_rho": float(spearman_rho),
         }
 
     def _add_baseline_deltas(self, df: pd.DataFrame) -> None:

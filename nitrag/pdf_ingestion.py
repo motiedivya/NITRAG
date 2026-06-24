@@ -342,7 +342,7 @@ class ColumnDetector:
         For single-column pages: top-to-bottom, left-to-right.
         For two-column pages: left column (top-to-bottom) then right column.
         """
-        page_els = [e for e in elements if int(e.get("page_number") or -1) == page_number]
+        page_els = [e for e in elements if e.get("page_number") == page_number]
 
         def _sort_key(e: Dict[str, Any]) -> Tuple[float, float]:
             return (float(e.get("y0") or 0), float(e.get("x0") or 0))
@@ -647,7 +647,7 @@ class PDFIngestionPipeline:
             if self.config.detect_columns:
                 block_els = [
                     e for e in elements
-                    if int(e.get("page_number") or -1) == pnum and e.get("element_type") == "block"
+                    if e.get("page_number") == pnum and e.get("element_type") == "block"
                 ]
                 col_count = self._col_detector.detect_column_count(
                     block_els, float(page["page_width"])
@@ -681,13 +681,17 @@ class PDFIngestionPipeline:
 
         # ---- step 8: update manifest ----
         native_ct  = sum(1 for p in pages if p.get("page_type") == PageType.NATIVE.value)
-        scanned_ct = sum(1 for p in pages if p.get("page_type") == PageType.SCANNED_OCR.value)
-        two_col_ct = sum(1 for p in pages if int(p.get("column_count") or 1) > 1)
+        scanned_ct   = sum(1 for p in pages if p.get("page_type") == PageType.SCANNED_OCR.value)
+        mixed_ct     = sum(1 for p in pages if p.get("page_type") == PageType.MIXED.value)
+        img_only_ct  = sum(1 for p in pages if p.get("page_type") == PageType.IMAGE_ONLY.value)
+        two_col_ct   = sum(1 for p in pages if int(p.get("column_count") or 1) > 1)
 
         manifest["ingestion_augmentation"] = {
             "total_pages":        len(pages),
             "native_pages":       native_ct,
             "scanned_ocr_pages":  scanned_ct,
+            "mixed_pages":        mixed_ct,
+            "image_only_pages":   img_only_ct,
             "two_column_pages":   two_col_ct,
             "text_normalized":    self.config.normalize_text,
             "ocr_aware_headings": self.config.ocr_aware_headings,
@@ -702,6 +706,8 @@ class PDFIngestionPipeline:
         print(f"[Ingestion] Complete.")
         print(f"  Native pages:      {native_ct}")
         print(f"  Scanned/OCR pages: {scanned_ct}")
+        print(f"  Mixed pages:       {mixed_ct}")
+        print(f"  Image-only pages:  {img_only_ct}")
         print(f"  2-column pages:    {two_col_ct}")
 
         return manifest
