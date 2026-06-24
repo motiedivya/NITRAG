@@ -21,6 +21,15 @@ from nitrag.indexing_evaluation import IndexingEvaluationManager
 from nitrag.reranker_manager import RerankerManager, register_default_rerankers
 from nitrag.retriever_manager import RetrieverManager, register_default_retrievers
 from nitrag.rag_diagnostics_manager import RAGDiagnosticsManager
+# Semantic + generation stages
+from nitrag.config import RAGConfig
+from nitrag.embedding_manager import EmbeddingManager
+from nitrag.vector_index_manager import VectorIndexManager
+from nitrag.semantic_retrievers import register_semantic_retrievers
+from nitrag.context_assembler import ContextAssembler
+from nitrag.generation_manager import GenerationManager
+from nitrag.generation_evaluation import GenerationEvaluationManager
+from nitrag.rag_pipeline import RAGPipeline
 
 
 PDF_PATH = PROJECT_ROOT / "data" / "Visit Note - 10-14-2020.pdf"
@@ -240,6 +249,60 @@ def main() -> None:
     print("final evaluation:", final_summary["report_dir"])
     pipeline_rankings = pd.read_csv(final_eval.metrics_dir / "pipeline_rankings.csv")
     print(pipeline_rankings.head(30))
+
+    # ── Stage 6: Embedding ────────────────────────────────────────────────
+    print("\n=== Stage 6: Embedding ===")
+    rag_config = RAGConfig.local_ollama()   # swap to .openai_cloud() for cloud
+    embedding_manager = EmbeddingManager(store, rag_config.embedding)
+    embed_results = embedding_manager.embed_all_strategies(use_enriched=True, overwrite=False)
+    print("embedding results:", embed_results)
+    print("embedded strategies:", embedding_manager.list_embedded_strategies())
+
+    # ── Stage 6b: Vector Indexing ─────────────────────────────────────────
+    print("\n=== Stage 6b: Vector Indexing ===")
+    vector_index_manager = VectorIndexManager(store, embedding_manager, rag_config.vector_index)
+    vim_results = vector_index_manager.build_all(overwrite=False)
+    print("vector index results:", vim_results)
+    print("indexed strategies:", vector_index_manager.list_built_strategies())
+
+    # Register semantic retrievers into existing retriever_manager
+    register_semantic_retrievers(
+        retriever_manager,
+        embedding_manager,
+        vector_index_manager,
+        alpha=rag_config.retrieval.hybrid_alpha,
+    )
+    print("retrievers after semantic registration:", retriever_manager.list_retrievers())
+
+    # ── Stage 9–11: End-to-end RAG pipeline ──────────────────────────────
+    print("\n=== Stage 9–11: End-to-end RAG pipeline ===")
+    pipeline = RAGPipeline(store, rag_config)
+
+    test_queries = [
+        "What medications were prescribed and at what dose?",
+        "What is the primary diagnosis or clinical impression?",
+        "What were the patient's vital signs?",
+    ]
+
+    evaluator = GenerationEvaluationManager()
+    for query in test_queries:
+        print(f"\nQuery: {query}")
+        try:
+            response = pipeline.answer(query, evaluate=True)
+            print(f"Answer: {response.answer[:300]}...")
+            print(f"Citations: {len(response.citations)}")
+            for c in response.citations[:3]:
+                print(f"  [{c.number}] {c.source_label}  confidence={c.confidence:.2f}")
+            if response.evaluation:
+                ev = response.evaluation
+                print(
+                    f"Eval: faithfulness={ev.faithfulness:.2f}  "
+                    f"hallucination_risk={ev.hallucination_risk:.2f}  "
+                    f"overall={ev.overall_score:.2f}"
+                )
+            print(f"Latency: {response.latency.get('total_ms', 0):.0f}ms")
+        except Exception as e:
+            print(f"  [skipped — LLM unavailable: {e}]")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,52 @@
+{
+  "embedding": {
+    "provider": "openai",
+    "model_name": "text-embedding-3-large",
+    "base_url": null,
+    "api_key": null,
+    "dimensions": 1024,
+    "batch_size": 32,
+    "normalize": true,
+    "device": "cpu",
+    "max_length": null
+  },
+  "llm": {
+    "provider": "openai_compatible",
+    "model_name": "gpt-4o",
+    "base_url": null,
+    "api_key": null,
+    "temperature": 0.1,
+    "max_tokens": 4096,
+    "timeout_seconds": 120,
+    "system_prompt": null
+  },
+  "vector_index": {
+    "backend": "faiss",
+    "index_type": "hnsw",
+    "metric": "cosine",
+    "hnsw_ef_construction": 200,
+    "hnsw_m": 16,
+    "hnsw_ef_search": 100,
+    "qdrant_url": "http://localhost:6333",
+    "qdrant_api_key": null,
+    "qdrant_collection_prefix": "nitrag"
+  },
+  "retrieval": {
+    "retriever_names": ["bm25", "dense", "hybrid"],
+    "chunk_strategy_name": "block_group_800_overlap_1",
+    "reranker_name": "hybrid_weighted",
+    "top_k_retrieve": 20,
+    "top_k_rerank": 5,
+    "hybrid_alpha": 0.5,
+    "use_hyde": true,
+    "query_expansion": true
+  },
+  "generation": {
+    "max_context_tokens": 5000,
+    "context_ordering": "score",
+    "include_metadata_in_context": true,
+    "min_citation_confidence": 0.2,
+    "hallucination_check": true,
+    "structured_output": true
+  }
+}
