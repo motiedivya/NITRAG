@@ -17,6 +17,10 @@ dependencies = [
     "faiss-cpu>=1.8.0",
     # LLM — universal adapter (OpenAI, Ollama, vLLM, LMStudio, Groq, …)
     "openai>=1.40.0",
+    # Web UI server
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

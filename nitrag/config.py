@@ -239,7 +239,7 @@ class RAGConfig:
 
     @classmethod
     def openai_cloud(cls, api_key: Optional[str] = None) -> "RAGConfig":
-        """Cloud: text-embedding-3-large + gpt-4o.
+        """Cloud: text-embedding-3-small + gpt-4o.
 
         Requirements: ``uv pip install fastembed faiss-cpu openai``
         Set OPENAI_API_KEY or pass api_key=.
@@ -247,10 +247,10 @@ class RAGConfig:
         return cls(
             embedding=EmbeddingConfig(
                 provider="openai",
-                model_name="text-embedding-3-large",
+                model_name="text-embedding-3-small",
                 base_url=None,
                 api_key=api_key,
-                dimensions=1024,            # reduced dims for efficiency
+                dimensions=1536,
                 batch_size=32,
             ),
             llm=LLMConfig(

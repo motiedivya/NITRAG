@@ -1,36 +1,56 @@
-# NIT-RAG
+# NITRAG — Medical Evidence RAG
 
-A production-grade, generic RAG system that implements all major strategies at each pipeline stage. The goal is to eventually drive an orchestrator/agent that selects the optimal RAG configuration for **Medical Data** workloads automatically.
+A production-grade, configuration-driven RAG system built around clinical documents. Every strategy at every pipeline stage is registered and benchmarked, so a future orchestrator can select the best configuration per document type and query intent automatically.
 
----
-
-## Vision
-
-Most RAG systems pick one strategy per stage and bake it in. NIT-RAG registers *all* known strategies at every stage (chunking, indexing, retrieval, reranking, etc.) so a future orchestrator can experiment, benchmark, and select the best configuration per document type and query intent — specifically targeting clinical/medical documents.
-
-The system is intentionally modular: each stage can be developed, evaluated, and swapped independently. Evaluation plots and metrics are planned for every stage so improvements can be measured objectively.
+**Current state:** all 12 pipeline stages are implemented and passing 486 tests. The system ships with a web UI.
 
 ---
 
-## Pipeline Stages
+## Quick start
 
-| # | Stage | Status | Notes |
+```bash
+# Install dependencies
+uv sync
+
+# Process a document (stages 1–6b)
+uv run python scripts/run_pipeline.py
+
+# Start the web UI
+uv run python scripts/start_server.py
+# → http://localhost:8000
+```
+
+Requires Python ≥ 3.12 and `uv`. For LLM-backed generation, Ollama must be running locally:
+
+```bash
+ollama serve
+ollama pull llama3.1:8b        # default generation model
+```
+
+---
+
+## Pipeline stages
+
+| # | Stage | Module | Notes |
 |---|-------|--------|-------|
-| 1 | **Data Ingestion** | ✅ Complete (PDF) | Full PDF ingestion via `PDFIngestionPipeline`: layout extraction, text normalisation, page-type detection, column detection, reading-order correction, OCR-aware heading detection. Non-PDF formats out of scope for now. |
-| 2 | **Metadata Extraction** | ✅ Complete | Document layout metadata + clinical metadata (entities, sections, dates, providers) |
-| 3 | **Chunking** | ✅ Complete | 8+ strategies: fixed-token, page, page-window, element, block-group, line-group, hierarchical, debug |
-| 4 | **Metadata Enrichment** | ✅ Complete | Enriches chunks with clinical entities, sections, layout zones, quality scores |
-| 5 | **Indexing (Lexical)** | ✅ Complete | 14 strategies: BM25, TF-IDF, phrase/char n-gram, fielded, entity, section/page, graph, positional, boolean, temporal, spatial, MinHash LSH |
-| 6 | **Embedding** | 🔴 Not Started | Config present (`text-embedding-3-small`) but no implementation; needed for semantic/vector retrieval |
-| 6b | **Vector Indexing** | 🔴 Not Started | Depends on Embedding; FAISS, Chroma, Qdrant, or similar vector store integration |
-| 7 | **Retrieval** | 🟡 Partial | 22+ lexical strategies (BM25, fusion, MMR, graph expansion, etc.); **zero semantic/vector retrieval** — blocked on Embedding |
-| 8 | **Reranking** | ✅ Complete | 10 strategies: keyword overlap, phrase proximity, metadata quality, clinical intent, length penalty, recency, diversity MMR, deduplication, hybrid |
-| 9 | **Context Assembly** | 🔴 Not Started | Assembling retrieved + reranked chunks into a prompt context window (token budget management, ordering, deduplication) |
-| 10 | **Generation** | 🔴 Not Started | LLM call with assembled context; streaming, structured output, citation tracking |
-| 11 | **Query Understanding** | 🔴 Not Started | Query expansion, classification, intent detection, HyDE — needed before retrieval |
-| 12 | **Evaluation Framework** | 🔴 Not Started | End-to-end RAGAS-style metrics: faithfulness, answer relevance, context precision/recall |
-
-> Stage numbers 6b, 11, 12 are additions beyond the original 9-stage plan — they are gaps that surface once those stages are implemented.
+| 1 | **PDF Ingestion** | `document_metadata_extractor.py` | Layout extraction, reading-order correction, page-type detection, OCR-aware heading detection |
+| 2 | **Clinical Metadata** | `clinical_metadata_extractor.py` | Entity extraction (medications, diagnoses, labs, vitals), section detection, date normalisation |
+| 3 | **Chunking** | `chunk_manager.py` | 8+ strategies: fixed-token, page, page-window, element, block-group, line-group, hierarchical, debug |
+| 3e | **Chunk Evaluation** | `chunking_evaluation.py` | Coverage, redundancy, boundary quality, token-length distribution |
+| 4 | **Metadata Enrichment** | `chunk_metadata_enricher.py` | Attaches clinical entities, sections, layout zones, quality scores to each chunk |
+| 4e | **Enrichment Evaluation** | `chunk_metadata_enrichment_evaluation.py` | Entity recall, quality score distributions |
+| 5 | **Lexical Indexing** | `index_manager.py` | 14 strategies: BM25, TF-IDF, phrase/char n-gram, fielded, entity, section/page, graph, positional, boolean, temporal, spatial, MinHash LSH |
+| 5e | **Index Evaluation** | `indexing_evaluation.py` | Postings coverage, vocabulary size, index health |
+| 6 | **Embeddings** | `embedding_manager.py` | fastembed (ONNX, no PyTorch) default; OpenAI and sentence-transformers also supported. Default: `nomic-ai/nomic-embed-text-v1.5` |
+| 6b | **Vector Index** | `vector_index_manager.py` | FAISS flat (exact cosine) and HNSW (ANN). L2-normalised vectors for cosine via inner product |
+| 7 | **Retrieval** | `retriever_manager.py` + `semantic_retrievers.py` | 22+ lexical strategies + dense, hybrid (BM25+dense RRF), HyDE |
+| 8 | **Reranking** | `reranker_manager.py` | 10 strategies: keyword overlap, phrase proximity, metadata quality, clinical intent, length penalty, recency, MMR diversity, deduplication, hybrid |
+| 9 | **Query Understanding** | `query_manager.py` | Medical abbreviation expansion (90+ terms), query classification (6 types), HyDE passage generation |
+| 10 | **Context Assembly** | `context_assembler.py` | Token-budget assembly, citation numbering, page/score/mixed ordering, evidence block formatting |
+| 11 | **Generation** | `generation_manager.py` | OpenAI-compatible provider (Ollama, vLLM, LMStudio, Groq, OpenAI) + Anthropic. 7-rule medical citation prompt |
+| 11e | **Generation Evaluation** | `generation_evaluation.py` | Faithfulness, answer relevance, context precision, citation coverage, hallucination risk, context recall |
+| 12 | **End-to-end Pipeline** | `rag_pipeline.py` | Orchestrates stages 9→11e. Preset factories: `local_ollama()`, `openai_cloud()`, `fast_local()`, `medical_precise()` |
+| — | **Web UI** | `server.py` + `ui/index.html` | FastAPI server + SPA with citation-first evidence display |
 
 ---
 
@@ -38,160 +58,277 @@ The system is intentionally modular: each stage can be developed, evaluated, and
 
 ```
 nitrag/
-├── document_metadata_extractor.py      # Stage 1+2: PDF layout extraction
-├── clinical_metadata_extractor.py      # Stage 2: Clinical entities, sections, dates
-├── chunk_manager.py                    # Stage 3: Chunking strategies + token store
-├── chunking_evaluation.py              # Stage 3: Coverage, redundancy, boundary metrics
-├── chunk_metadata_enricher.py          # Stage 4: Chunk enrichment with clinical metadata
-├── chunk_metadata_enrichment_evaluation.py  # Stage 4: Enrichment quality metrics
-├── index_manager.py                    # Stage 5: 14 lexical index strategies
-├── indexing_evaluation.py              # Stage 5: Index health, size, postings metrics
-├── retriever_manager.py                # Stage 7: 22+ retrieval strategies (lexical)
-├── reranker_manager.py                 # Stage 8: 10 reranking strategies
-├── reranking_evaluation.py             # Stage 8: Rank movement, diversity, latency
-├── rag_diagnostics_manager.py          # Cross-stage static + retrieval diagnostics
-└── final_evaluation.py                 # Cross-pipeline ranking and comparison
+├── document_metadata_extractor.py       # Stage 1: PDF layout extraction
+├── clinical_metadata_extractor.py       # Stage 2: Clinical entities, sections, dates
+├── pdf_ingestion.py                     # Stage 1 low-level: PDFIngestionPipeline
+├── chunk_manager.py                     # Stage 3: Chunking strategies + PdfTokenStore
+├── chunking_evaluation.py               # Stage 3e: Coverage, redundancy, boundary metrics
+├── chunk_metadata_enricher.py           # Stage 4: Chunk enrichment
+├── chunk_metadata_enrichment_evaluation.py  # Stage 4e: Enrichment quality metrics
+├── index_manager.py                     # Stage 5: 14 lexical index strategies
+├── indexing_evaluation.py               # Stage 5e: Index health + postings metrics
+├── config.py                            # RAGConfig + 5 sub-configs + preset factories
+├── embedding_manager.py                 # Stage 6: fastembed / OpenAI / sentence-transformers
+├── vector_index_manager.py              # Stage 6b: FAISS flat + HNSW
+├── query_manager.py                     # Stage 9: Query expansion + classification + HyDE
+├── retriever_manager.py                 # Stage 7: 22+ lexical retrieval strategies
+├── semantic_retrievers.py               # Stage 7: Dense, hybrid (RRF), HyDE retrieval
+├── reranker_manager.py                  # Stage 8: 10 reranking strategies
+├── reranking_evaluation.py              # Stage 8: Rank movement, diversity, latency
+├── context_assembler.py                 # Stage 10: Token-budget context + citation numbering
+├── generation_manager.py                # Stage 11: LLM generation + citation grounding
+├── generation_evaluation.py             # Stage 11e: Faithfulness + hallucination risk
+├── rag_pipeline.py                      # Stage 12: End-to-end orchestrator
+├── rag_diagnostics_manager.py           # Cross-stage static + retrieval diagnostics
+├── retrieval_evaluation.py              # Retrieval-specific metrics
+├── final_evaluation.py                  # Cross-pipeline strategy comparison
+├── server.py                            # FastAPI web server
+└── ui/
+    └── index.html                       # Single-file SPA (vanilla JS)
 scripts/
-└── run_pipeline.py                     # End-to-end pipeline runner
+├── run_pipeline.py                      # End-to-end pipeline runner
+└── start_server.py                      # Launch the web UI server
+configs/
+├── local_ollama.json
+├── openai_cloud.json
+└── medical_precise.json
+tests/
+├── conftest.py                          # MockStore, CORPUS, synthetic_results fixtures
+├── test_config.py
+├── test_context_assembler.py
+├── test_evaluation_managers.py
+├── test_generation_evaluation.py
+├── test_generation_manager.py
+├── test_helpers.py
+├── test_index_strategies.py
+├── test_query_manager.py
+├── test_reranker_strategies.py
+├── test_retriever_strategies.py
+├── test_semantic_retrievers.py
+└── test_server.py
 ```
 
 ### Storage layout
 
 ```
 rag_store/{doc_id}/
-├── tokens.dat                          # Encoded token stream
+├── manifest.json
+├── tokens.dat                           # Encoded token stream
 ├── layout_{pages,elements,spans,words}.parquet
 ├── layout_manifest.json
 ├── clinical_document_metadata.json
 ├── clinical_{sections,element_metadata,entities}.parquet
 ├── chunks/{strategy}.parquet
 ├── chunks_enriched/{strategy}.parquet
-├── indexes/{chunk_strategy}/{index_name}/{docs,vocab,postings}.parquet
-└── reports/{stage}/                    # Metrics + plots per evaluation run
+├── indexes/{chunk_strategy}/
+│   ├── {index_name}/{docs,vocab,postings}.parquet   # lexical
+│   └── dense/
+│       ├── faiss.index
+│       ├── chunk_ids.npy
+│       ├── docs.parquet
+│       └── manifest.json
+├── embeddings/{chunk_strategy}/
+│   ├── vectors.npy
+│   ├── chunk_ids.npy
+│   └── manifest.json
+└── reports/{stage}/                     # Metrics + plots per evaluation run
 ```
 
 ---
 
-## TODO
+## Configuration
 
-### Phase 1 — Data Ingestion
+All backends are swapped with one field change. The system ships with four preset factories:
 
-**PDF ingestion — complete** (`nitrag/pdf_ingestion.py`, `scripts/ingest_pdf.py`)
+```python
+from nitrag.config import RAGConfig
 
-- [x] Layout extraction (pages, blocks, lines, spans, words, images, drawings)
-- [x] Text normalisation (Unicode NFC, ligature expansion, zero-width char removal)
-- [x] Page type detection: native vs. scanned/OCR'd vs. image-only
-- [x] Multi-column layout detection + reading-order correction
-- [x] OCR-aware heading detection (position/shape-based; works without font cues)
-- [x] Per-page quality metrics (font variety, image area ratio, OCR quality proxy)
-- [x] Standalone script: `scripts/ingest_pdf.py`
+# Self-hosted: nomic-embed-text-v1.5 (fastembed) + llama3.1:8b (Ollama)
+config = RAGConfig.local_ollama()
 
-**Remaining (non-PDF formats — deferred)**
+# Cloud: text-embedding-3-large + gpt-4o (set OPENAI_API_KEY)
+config = RAGConfig.openai_cloud()
 
-- [ ] Ingestion evaluation metrics and plots (page-type distribution, normalisation diff, heading accuracy)
-- [ ] Multi-document batch ingestion runner
-- [ ] Other formats: DOCX, plain text, HTML, CSV (separate format adapters, later phase)
+# Fast dev: bge-small-en + mistral:7b
+config = RAGConfig.fast_local()
 
-### Phase 2 — Embedding
+# High-accuracy: bge-large-en + wide retrieval + HyDE
+config = RAGConfig.medical_precise()
 
-- [ ] Implement embedding generation (`text-embedding-3-small` baseline)
-- [ ] Support multiple embedding models (OpenAI, HuggingFace sentence-transformers, BiomedBERT, ClinicalBERT)
-- [ ] Chunk-level embedding with caching (avoid re-embedding unchanged chunks)
-- [ ] Embedding evaluation: dimensionality, cosine similarity distributions, coverage
+# Load from JSON file
+config = RAGConfig.from_file("configs/local_ollama.json")
 
-### Phase 3 — Vector Indexing
+# Mutate any field
+config.llm.base_url = "http://my-server:11434/v1"
+config.retrieval.top_k_retrieve = 30
+config.embedding.model_name = "BAAI/bge-large-en-v1.5"
+```
 
-- [ ] FAISS flat/IVF index integration
-- [ ] Chroma or Qdrant for persistent vector storage
-- [ ] Hybrid index: lexical (BM25) + dense (FAISS) side-by-side under IndexManager
-- [ ] Vector index evaluation: recall@k, index size, query latency
+**Environment variable overrides** (all optional):
 
-### Phase 4 — Semantic Retrieval
-
-- [ ] Dense vector retrieval strategy in RetrieverManager
-- [ ] Hybrid retrieval: lexical + semantic fusion (RRF and weighted score fusion)
-- [ ] HyDE (Hypothetical Document Embeddings) retrieval
-- [ ] Semantic retrieval evaluation: MRR, recall@k, latency
-
-### Phase 5 — Query Understanding
-
-- [ ] Query classification (factoid vs. summary vs. temporal vs. comparison)
-- [ ] Query expansion (synonyms, medical term expansion via UMLS)
-- [ ] HyDE query reformulation
-- [ ] Query evaluation: expansion quality, downstream retrieval impact
-
-### Phase 6 — Context Assembly
-
-- [ ] Token-budget-aware context window builder
-- [ ] Chunk ordering strategies (by score, by document order, by page)
-- [ ] Deduplication across retrieved chunks before assembly
-- [ ] Citation / provenance tracking per assembled context segment
-
-### Phase 7 — Generation
-
-- [ ] LLM integration (OpenAI `gpt-4o` baseline)
-- [ ] Streaming response support
-- [ ] Structured output (JSON schema for medical Q&A)
-- [ ] Citation grounding — map each claim back to a source chunk
-- [ ] Hallucination guard: faithfulness check against retrieved context
-
-### Phase 8 — End-to-End Evaluation Framework
-
-- [ ] RAGAS-style metrics: faithfulness, answer relevance, context precision, context recall
-- [ ] Medical-domain metrics: clinical accuracy, entity grounding
-- [ ] Per-stage latency breakdown
-- [ ] Cross-pipeline comparison dashboard (matplotlib or similar)
-- [ ] Golden test set for the medical domain
-
-### Phase 9 — Orchestrator / Agent
-
-- [ ] Hyperparameter space definition (which chunker × which indexer × which retriever × which reranker)
-- [ ] Search strategy: grid search → Bayesian optimization → RL-based
-- [ ] Objective function: downstream answer quality (RAGAS score) for medical queries
-- [ ] Per-document-type profiles (Visit Note, Discharge Summary, Radiology, Lab)
-- [ ] Configuration persistence and experiment tracking
+| Variable | Default |
+|---|---|
+| `NITRAG_EMBEDDING_PROVIDER` | `fastembed` |
+| `NITRAG_EMBEDDING_MODEL` | `nomic-ai/nomic-embed-text-v1.5` |
+| `NITRAG_LLM_PROVIDER` | `openai_compatible` |
+| `NITRAG_LLM_MODEL` | `llama3.1:8b` |
+| `NITRAG_LLM_BASE_URL` | `http://localhost:11434/v1` |
+| `OPENAI_API_KEY` | — |
+| `ANTHROPIC_API_KEY` | — |
 
 ---
 
-## Run
+## Web UI
 
 ```bash
-# Using uv (preferred)
-uv run scripts/run_pipeline.py
-
-# Or using the project venv
-/home/neuralit/.venv/bin/python scripts/run_pipeline.py
+uv run python scripts/start_server.py [--port 8000] [--reload]
 ```
 
-Requires a PDF at `data/` and the env vars from `.env.example`:
+The UI is a three-panel clinical tool:
 
-```bash
-cp .env.example .env
-# fill in OPENAI_API_KEY (needed once Embedding / Generation stages are implemented)
+- **Left sidebar** — document selector, config preset, pipeline status per stage
+- **Center workspace** — query input, answer with inline `[N]` citation markers, evaluation strip (faithfulness, relevance, hallucination risk, overall score)
+- **Right evidence panel** — citation cards (quote, page, section, confidence bar, content-type chips); "All Chunks" tab shows every retrieved passage with retriever name and score
+
+**Citation interaction:** hover or click a `[N]` marker in the answer to highlight and scroll to the corresponding evidence card.
+
+**Other features:**
+
+- **Upload → process flow** — upload a PDF from the sidebar; a modal tracks all 7 pipeline stages in real time via 2 s polling
+- **Query history** — previous queries listed in the sidebar; click any to restore the full response
+- **Keyboard shortcuts** — `Ctrl+K` focuses the query input; `Enter` submits; `Shift+Enter` adds a newline
+- **Export** — downloads the answer, citations, and evaluation as a Markdown file
+- **New query button** — clears the workspace and resets to the welcome state
+
+### API endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Serve the SPA |
+| `GET` | `/api/health` | Health check |
+| `GET` | `/api/documents` | List all processed documents |
+| `GET` | `/api/documents/{doc_id}` | Single document info + stage status |
+| `GET` | `/api/config/presets` | Available configuration presets |
+| `POST` | `/api/upload` | Upload a PDF (stores to `data/`) |
+| `POST` | `/api/process` | Run full pipeline on an uploaded PDF |
+| `GET` | `/api/process/status/{doc_id}` | Poll processing progress |
+| `POST` | `/api/query` | Run a RAG query, return JSON with answer + citations + evaluation |
+
+---
+
+## Usage
+
+### Programmatic
+
+```python
+from nitrag.rag_pipeline import RAGPipeline
+from nitrag.chunk_manager import PdfTokenStore
+
+store = PdfTokenStore(encoding_model_name="gpt-4o", root_dir="rag_store")
+store.load("doc_e7fb48687c98a19c")
+
+pipeline = RAGPipeline.local_ollama(store)
+response = pipeline.answer("What medications were prescribed?", evaluate=True)
+
+print(response.answer)
+for c in response.citations:
+    print(f"  [{c.number}] {c.source_label}  confidence={c.confidence:.0%}")
+    print(f"  \"{c.quote}\"")
+
+print(f"Faithfulness: {response.evaluation.faithfulness:.0%}")
+print(f"Hallucination risk: {response.evaluation.hallucination_risk:.0%}")
+```
+
+### Building embeddings and indexes for a new document
+
+```python
+from nitrag.config import RAGConfig
+from nitrag.embedding_manager import EmbeddingManager
+from nitrag.vector_index_manager import VectorIndexManager
+
+config = RAGConfig.local_ollama()
+em = EmbeddingManager(store, config.embedding)
+em.embed_all_strategies()                    # ~30s for a 3-page note
+
+vim = VectorIndexManager(store, em, config.vector_index)
+vim.build_all()                              # <1s for FAISS flat
+```
+
+### Running evaluations
+
+```python
+from nitrag.generation_evaluation import GenerationEvaluationManager
+
+evaluator = GenerationEvaluationManager()
+report = evaluator.evaluate(response.generation_result, response.context)
+print(f"Overall: {report.overall_score:.2f}")
+print(f"Faithfulness: {report.faithfulness:.2f}")
+print(f"Hallucination risk: {report.hallucination_risk:.2f}")
+# Note-level warnings
+for note in report.notes:
+    print(f"  ⚠ {note}")
 ```
 
 ---
 
-## Production Infrastructure
+## Tests
 
-When this system moves to production it will run on the following stack. All choices follow a **reliable + KISS** principle — no tool is added unless it is well-proven and operationally simple.
+```bash
+uv run pytest                    # all 486 tests
+uv run pytest -x                 # stop on first failure
+uv run pytest tests/test_generation_manager.py -v
+uv run pytest --cov=nitrag --cov-report=term-missing
+```
+
+Tests use a synthetic medical corpus (8 clinical passages covering HTN, DM, medications, labs, negation, imaging) and a `MockStore` that maps `(start, end) → text` without any filesystem I/O. No LLM, no network, no FAISS needed for unit tests.
+
+---
+
+## Design principles
+
+- **One strategy per class** — every chunker, indexer, retriever, reranker is a self-contained class registered with a manager. Adding a new strategy never changes existing ones.
+- **Configuration-driven** — every backend is swappable by changing one field in `RAGConfig`. Switching from Ollama to OpenAI or from fastembed to sentence-transformers is one line.
+- **No PyTorch for embeddings** — fastembed uses ONNX Runtime; runs on CPU with no GPU or PyTorch dependency.
+- **Parquet-native storage** — all data lives in typed Parquet files for efficient I/O, schema enforcement, and compatibility with downstream tools.
+- **Token-indexed architecture** — chunks track `(start_index, end_index)` token positions so any stage can reconstruct the exact document span.
+- **Citation chain** — every answer sentence is grounded: PDF page → document element → token span → chunk → `[N]` in answer.
+- **Evaluation at every stage** — no stage is complete without metrics and plots that show whether a strategy beats the baseline.
+
+---
+
+## Production infrastructure
+
+When this system moves to production it will run on the following stack. All choices follow a **reliable + KISS** principle.
 
 | Concern | Tool | Role |
 |---------|------|------|
 | Queue management | **NSQ** | Async document ingestion jobs, pipeline task dispatch |
-| API layer | **FastAPI** | REST endpoints for ingestion, retrieval, generation |
+| API layer | **FastAPI** | REST endpoints — already implemented |
 | Real-time push | **Centrifugo** | WebSocket delivery of streaming generation responses |
 | Caching | **Redis** | Embedding cache, query result cache, session state |
-| Operational data | **MongoDB** | Document metadata, pipeline run records, user/org data (default; re-evaluate if relational needs arise) |
-| Vector storage | **TBD** | Embedding index — candidates: Qdrant (self-hosted, reliable, easy), pgvector (zero extra infra if Postgres is already present) |
-
-> Tool selection philosophy: only pick tools that are widely battle-tested and have a low operational surface area. When two tools solve the same problem equally well, pick the simpler one.
+| Operational data | **MongoDB** | Document metadata, pipeline run records, user/org data |
+| Vector storage | **Qdrant** | Self-hosted, HNSW index, supports named collections + filtering |
 
 ---
 
-## Design Principles
+## Roadmap
 
-- **One strategy per class** — every chunker, indexer, retriever, reranker is a self-contained class registered with a manager. Adding a new strategy never changes existing ones.
-- **Parquet-native storage** — all data lives in typed Parquet files for efficient I/O, schema enforcement, and compatibility with downstream tools.
-- **Token-indexed architecture** — chunks track start/end token positions so any stage can reconstruct the exact document span.
-- **Evaluation at every stage** — no stage is considered complete until it ships metrics and plots that let you see whether a strategy is better or worse than the baseline.
+### Near-term
+
+- [ ] Streaming generation via SSE (server-sent events) endpoint
+- [ ] Multi-document retrieval (query across all documents in rag_store)
+- [ ] Document-type-aware configuration profiles (visit note vs. discharge summary vs. radiology)
+- [ ] Structured output mode (JSON schema for medication extraction, diagnosis listing)
+
+### Orchestrator / agent
+
+- [ ] Hyperparameter space: chunker × indexer × retriever × reranker × embedding model
+- [ ] Bayesian optimisation over RAGAS faithfulness on a held-out query set
+- [ ] Per-document-type profiles learned from evaluation runs
+- [ ] Configuration persistence and experiment tracking (MLflow or W&B)
+
+### Data expansion
+
+- [ ] Batch ingestion runner (folder of PDFs → rag_store)
+- [ ] DICOM/HL7 adapters for structured clinical data
+- [ ] De-identification pipeline before ingestion (PHI scrubbing)
