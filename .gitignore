@@ -17,6 +17,11 @@ env/
 .env.*
 !.env.example
 
+# Google Cloud service-account keys — never commit
+*-service-account*.json
+*-credentials*.json
+ocr-neuralit-*.json
+
 # Jupyter
 .ipynb_checkpoints/
 

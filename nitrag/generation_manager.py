@@ -293,12 +293,25 @@ def extract_citation_numbers(text: str) -> List[int]:
 def resolve_citations(
     answer: str,
     context: AssembledContext,
-    min_confidence: float = 0.25,
+    min_confidence: float = 0.15,
 ) -> List[Citation]:
-    """Map [N] citation markers in the answer to ContextChunk metadata."""
+    """Map [N] citation markers in the answer to ContextChunk metadata.
+
+    For each [N], we find the answer sentences that explicitly reference it,
+    then match those specific sentences against the chunk text.  This gives a
+    precise source quote that the render_page endpoint can highlight exactly.
+    """
     chunk_by_citation: Dict[int, ContextChunk] = {
         c.citation_number: c for c in context.chunks
     }
+
+    # Build: citation_number → list of answer sentences that contain [N]
+    answer_sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", answer.strip()) if s.strip()]
+    citation_to_sents: Dict[int, List[str]] = {}
+    for sent in answer_sents:
+        for n in {int(m) for m in _CITATION_RE.findall(sent)}:
+            citation_to_sents.setdefault(n, []).append(sent)
+
     seen: set = set()
     citations: List[Citation] = []
 
@@ -308,11 +321,21 @@ def resolve_citations(
         seen.add(n)
         c = chunk_by_citation[n]
 
-        # Find the best supporting sentence in the chunk
-        quote, confidence = _best_supporting_quote(answer, c.text)
-        if confidence < min_confidence and not quote:
-            quote = c.text[:200].strip()
-            confidence = 0.0
+        # Match each answer sentence that references [N] against the chunk
+        ans_sents_for_n = citation_to_sents.get(n, [])
+        best_quote = ""
+        best_confidence = 0.0
+
+        for ans_sent in ans_sents_for_n:
+            quote, score = _best_matching_chunk_sentence(ans_sent, c.text)
+            if score > best_confidence and quote:
+                best_quote = quote
+                best_confidence = score
+
+        # Fallback: use the first 300 chars of the chunk
+        if not best_quote or best_confidence < min_confidence:
+            best_quote = c.text[:300].strip()
+            best_confidence = 0.0
 
         citations.append(Citation(
             number=n,
@@ -320,33 +343,146 @@ def resolve_citations(
             page_start=c.page_start,
             page_end=c.page_end,
             section=c.section,
-            quote=quote,
-            confidence=round(confidence, 3),
+            quote=best_quote,
+            confidence=round(best_confidence, 3),
             source_label=c.source_label,
         ))
 
     return sorted(citations, key=lambda x: x.number)
 
 
+_QUOTE_STOPWORDS = frozenset({
+    "the", "a", "an", "is", "was", "were", "are", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "can", "to", "of", "in", "on", "at", "by",
+    "for", "with", "and", "or", "but", "from", "that", "this", "it", "as",
+    "no", "yes", "also", "about", "patient", "patients",
+})
+
+
+def _content_tokens(text: str) -> set:
+    return set(re.findall(r"[a-z0-9]+", text.lower())) - _QUOTE_STOPWORDS
+
+
+def _f1_score(a_tokens: set, b_tokens: set) -> float:
+    if not a_tokens or not b_tokens:
+        return 0.0
+    inter = len(a_tokens & b_tokens)
+    prec = inter / len(b_tokens)
+    rec  = inter / len(a_tokens)
+    return 2 * prec * rec / max(prec + rec, 1e-9)
+
+
+def _best_matching_chunk_sentence(answer_sentence: str, chunk_text: str) -> tuple[str, float]:
+    """Find the sentence(s) in chunk_text most similar to a specific answer sentence.
+
+    Uses F1 on content tokens (stopwords removed) so short answer sentences don't
+    dominate recall unfairly.  Returns up to two adjacent high-scoring sentences
+    joined together when both score well, to give the renderer enough text to find.
+    """
+    a_tok = _content_tokens(answer_sentence)
+    if not a_tok:
+        return chunk_text[:300].strip(), 0.0
+
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", chunk_text.strip()) if len(s.strip()) >= 8]
+    if not sents:
+        return chunk_text[:300].strip(), 0.0
+
+    scored = []
+    for sent in sents:
+        s_tok = _content_tokens(sent)
+        scored.append((sent, _f1_score(a_tok, s_tok)))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    best_sent, best_score = scored[0]
+
+    # If the second sentence also scores ≥ 60% of the best, include it
+    # (supports multi-sentence evidence for a single claim)
+    result_sents = [best_sent]
+    if len(scored) > 1:
+        second_sent, second_score = scored[1]
+        if second_score >= best_score * 0.60 and second_score >= 0.15:
+            result_sents.append(second_sent)
+
+    return " ".join(result_sents)[:500], best_score
+
+
 def _best_supporting_quote(answer: str, chunk_text: str) -> tuple[str, float]:
-    """Find the sentence in chunk_text most lexically similar to the answer."""
-    answer_tokens = set(re.findall(r"[a-z0-9]+", answer.lower()))
-    sentences = re.split(r"(?<=[.!?])\s+", chunk_text.strip())
-    best_sentence = ""
-    best_score = 0.0
-    for sent in sentences:
-        sent = sent.strip()
-        if len(sent) < 10:
-            continue
-        sent_tokens = set(re.findall(r"[a-z0-9]+", sent.lower()))
-        if not sent_tokens:
-            continue
-        overlap = len(answer_tokens & sent_tokens)
-        score = overlap / max(len(sent_tokens), 1)
-        if score > best_score:
-            best_score = score
-            best_sentence = sent
-    return best_sentence[:300], best_score
+    """Legacy wrapper — kept for any external callers; prefers sentence-level matching."""
+    return _best_matching_chunk_sentence(answer, chunk_text)
+
+
+def build_sentence_citations(
+    answer: str,
+    context: AssembledContext,
+    min_score: float = 0.12,
+) -> List[Dict[str, Any]]:
+    """Post-generation step: map each answer sentence to its source chunk sentences.
+
+    Returns a list of:
+    {
+        "sentence_idx": int,
+        "sentence": str,
+        "citations": [{"citation_number", "chunk_id", "page_start", "page_end",
+                       "quote", "score", "section", "source_label", "inferred"}]
+    }
+    """
+    chunk_by_n: Dict[int, ContextChunk] = {c.citation_number: c for c in context.chunks}
+
+    answer_sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", answer.strip()) if s.strip()]
+
+    result = []
+    for idx, sent in enumerate(answer_sents):
+        cited_ns = sorted({int(m) for m in _CITATION_RE.findall(sent)})
+        sent_citations = []
+
+        # Explicit [N] citations in this sentence → find exact source sentence
+        for n in cited_ns:
+            if n not in chunk_by_n:
+                continue
+            c = chunk_by_n[n]
+            quote, score = _best_matching_chunk_sentence(sent, c.text)
+            if not quote:
+                quote = c.text[:300].strip()
+            sent_citations.append({
+                "citation_number": n,
+                "chunk_id":        c.chunk_id,
+                "page_start":      c.page_start,
+                "page_end":        c.page_end,
+                "quote":           quote,
+                "score":           round(score, 3),
+                "section":         c.section,
+                "source_label":    c.source_label,
+                "inferred":        False,
+            })
+
+        # No explicit citation — search all chunks for the best match
+        if not cited_ns:
+            candidates = []
+            for c in context.chunks:
+                quote, score = _best_matching_chunk_sentence(sent, c.text)
+                if score >= min_score and quote:
+                    candidates.append({
+                        "citation_number": c.citation_number,
+                        "chunk_id":        c.chunk_id,
+                        "page_start":      c.page_start,
+                        "page_end":        c.page_end,
+                        "quote":           quote,
+                        "score":           round(score, 3),
+                        "section":         c.section,
+                        "source_label":    c.source_label,
+                        "inferred":        True,
+                    })
+            candidates.sort(key=lambda x: x["score"], reverse=True)
+            sent_citations = candidates[:2]
+
+        result.append({
+            "sentence_idx": idx,
+            "sentence":     sent,
+            "citations":    sent_citations,
+        })
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

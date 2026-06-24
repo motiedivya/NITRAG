@@ -16,7 +16,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
@@ -276,6 +276,39 @@ async def get_document(doc_id: str):
     return {**info, "processing": proc}
 
 
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: str):
+    """Delete a document and all its pipeline artefacts from rag_store."""
+    import shutil as _shutil
+    doc_dir = RAG_STORE_ROOT / doc_id
+    if not doc_dir.is_dir():
+        raise HTTPException(404, f"Document {doc_id!r} not found")
+
+    # Evict from pipeline cache
+    to_drop = [k for k in _pipeline_cache if k.startswith(doc_id + ":")]
+    for k in to_drop:
+        del _pipeline_cache[k]
+
+    # Remove any in-progress status entry
+    _processing_status.pop(doc_id, None)
+
+    # Remove the source PDF from data/ if it lives there
+    pdf_path = _get_pdf_path(doc_id)
+    if pdf_path and pdf_path.exists() and DATA_DIR in pdf_path.parents:
+        try:
+            pdf_path.unlink()
+        except Exception:
+            pass  # non-fatal — rag_store dir removal is the important part
+
+    # Remove the entire rag_store directory
+    try:
+        _shutil.rmtree(doc_dir)
+    except Exception as e:
+        raise HTTPException(500, f"Could not delete document data: {e}")
+
+    return {"deleted": doc_id}
+
+
 @app.get("/api/documents/{doc_id}/pdf")
 async def serve_pdf(doc_id: str):
     pdf_path = _get_pdf_path(doc_id)
@@ -284,12 +317,20 @@ async def serve_pdf(doc_id: str):
     return FileResponse(str(pdf_path), media_type="application/pdf", filename=pdf_path.name)
 
 
+_HIGHLIGHT_STOP = frozenset([
+    "the","a","an","is","was","were","are","be","been","being","have","has",
+    "had","do","does","did","will","would","could","should","may","might","can",
+    "to","of","in","on","at","by","for","with","and","or","but","from","that",
+    "this","it","as","no","not","also","about","after","before","its","their",
+    "they","he","she","we","you","i","was","all","any","both","each","more",
+    "most","other","such","than","then","when","where","which","who","how",
+])
+
+
 def _split_into_sentences(text: str) -> list:
     """Split text into matchable sentences."""
     import re
-    # Split on sentence-ending punctuation followed by whitespace
     parts = re.split(r'(?<=[.!?])\s+', text.strip())
-    # If only one part (no sentence breaks), try splitting on clause separators
     if len(parts) == 1:
         parts = re.split(r'(?:[;:])\s+', text.strip())
     return [p.strip() for p in parts if p.strip()]
@@ -304,28 +345,82 @@ def _sentence_fragments(sentence: str) -> list:
         frags.append(" ".join(words[:max(6, n * 4 // 5)]))
     if n > 12:
         frags.append(" ".join(words[:max(5, n * 3 // 5)]))
-    # Character-length fallbacks
-    for length in (80, 55, 35):
-        if len(sentence) > length + 10:
+    for length in (90, 65, 45, 30):
+        if len(sentence) > length + 8:
             frags.append(sentence[:length])
     return frags
 
 
-def _find_quote_rects(page, quote: str) -> list:
-    """Locate all rectangles on the page that correspond to the quote text.
+def _find_by_word_window(page, quote: str) -> list:
+    """Word-level sliding-window match: robust fallback for OCR / whitespace gaps.
 
-    Strategy 1 — sentence-by-sentence exact search using PyMuPDF.
-    Strategy 2 — word-overlap (Jaccard) on text blocks when exact search fails.
-    Returns (matched_rects, used_fallback).
+    Finds the cluster of page words that best covers the distinctive words in
+    the quote, highlights those exact word bounding boxes.
+    """
+    import re
+    import fitz
+
+    q_words = [re.sub(r"[^a-z0-9]", "", w) for w in quote.lower().split()]
+    q_words = [w for w in q_words if len(w) >= 4 and w not in _HIGHLIGHT_STOP]
+    if len(q_words) < 3:
+        return []
+    q_set = set(q_words)
+
+    page_words = page.get_text("words")   # (x0, y0, x1, y1, word, blk, ln, wn)
+    if not page_words:
+        return []
+    page_norm = [re.sub(r"[^a-z0-9]", "", w[4].lower()) for w in page_words]
+    n_p = len(page_words)
+
+    # Find anchor positions (any page word that is a quote word)
+    anchors = [i for i, w in enumerate(page_norm) if w in q_set]
+    if not anchors:
+        return []
+
+    # For each anchor expand a window and compute recall of quote words
+    win_radius = max(len(q_words) * 3, 20)
+    best_score = 0.0
+    best_start, best_end = 0, 0
+
+    for anchor in anchors[:40]:
+        s = max(0, anchor - win_radius // 2)
+        e = min(n_p, anchor + win_radius)
+        window_set = {w for w in page_norm[s:e] if w}
+        inter = len(q_set & window_set)
+        score = inter / len(q_set)
+        if score > best_score:
+            best_score = score
+            best_start, best_end = s, e
+
+    if best_score < 0.45:
+        return []
+
+    matched = []
+    for i in range(best_start, best_end):
+        if page_norm[i] in q_set:
+            w = page_words[i]
+            r = fitz.Rect(w[0], w[1], w[2], w[3])
+            ann = page.add_highlight_annot(r)
+            ann.set_colors(stroke=[1.0, 0.85, 0.0])
+            ann.update()
+            matched.append(r)
+    return matched
+
+
+def _find_quote_rects(page, quote: str) -> list:
+    """Three-strategy search for quote text.
+
+    1. Exact sentence/fragment search via PyMuPDF search_for()
+    2. Word-level sliding window (robust to OCR / whitespace differences)
+    3. Block Jaccard fallback (content words only, threshold 0.32)
     """
     import re
     import fitz
 
     matched: list = []
 
-    # ── Strategy 1: sentence-level exact search ──────────────────────────────
-    sentences = _split_into_sentences(quote)
-    for sent in sentences:
+    # ── Strategy 1: exact sentence/fragment search ───────────────────────────
+    for sent in _split_into_sentences(quote):
         sent = sent.strip()
         if len(sent) < 10:
             continue
@@ -335,38 +430,45 @@ def _find_quote_rects(page, quote: str) -> list:
                 continue
             rects = page.search_for(frag)
             if rects:
-                for r in rects[:6]:
+                for r in rects[:8]:
                     ann = page.add_highlight_annot(r)
                     ann.set_colors(stroke=[1.0, 0.85, 0.0])
                     ann.update()
                     matched.append(r)
-                break  # found this sentence, move to next
+                break
 
     if matched:
         return matched
 
-    # ── Strategy 2: word-overlap fallback on text blocks ────────────────────
-    quote_words = set(re.findall(r"[a-z]+", quote.lower()))
-    if not quote_words:
+    # ── Strategy 2: word-level window ────────────────────────────────────────
+    matched = _find_by_word_window(page, quote)
+    if matched:
+        return matched
+
+    # ── Strategy 3: block Jaccard (content words, tighter threshold) ─────────
+    q_words = {w for w in re.findall(r"[a-z]+", quote.lower())
+               if w not in _HIGHLIGHT_STOP and len(w) >= 4}
+    if not q_words:
         return []
 
     best_score = 0.0
     best_rect = None
     for block in page.get_text("blocks"):
-        if len(block) < 7 or block[6] != 0:          # skip image blocks
+        if len(block) < 7 or block[6] != 0:
             continue
-        bx0, by0, bx1, by1, btext = block[0], block[1], block[2], block[3], block[4]
+        btext = block[4]
         if not btext or btext.isspace():
             continue
-        bwords = set(re.findall(r"[a-z]+", btext.lower()))
-        if not bwords:
+        b_words = {w for w in re.findall(r"[a-z]+", btext.lower())
+                   if w not in _HIGHLIGHT_STOP and len(w) >= 4}
+        if not b_words:
             continue
-        jaccard = len(quote_words & bwords) / max(len(quote_words | bwords), 1)
+        jaccard = len(q_words & b_words) / max(len(q_words | b_words), 1)
         if jaccard > best_score:
             best_score = jaccard
-            best_rect = fitz.Rect(bx0, by0, bx1, by1)
+            best_rect = fitz.Rect(block[0], block[1], block[2], block[3])
 
-    if best_rect and best_score > 0.18:
+    if best_rect and best_score >= 0.32:
         ann = page.add_highlight_annot(best_rect)
         ann.set_colors(stroke=[1.0, 0.85, 0.0])
         ann.update()
@@ -375,9 +477,31 @@ def _find_quote_rects(page, quote: str) -> list:
     return []
 
 
+def _quote_match_count(page, quote: str) -> int:
+    """Cheap probe: how many fragment hits does this page have? No annotations."""
+    count = 0
+    for sent in _split_into_sentences(quote):
+        sent = sent.strip()
+        if len(sent) < 10:
+            continue
+        for frag in _sentence_fragments(sent):
+            if page.search_for(frag.strip()):
+                count += 1
+                break
+    return count
+
+
 @app.get("/api/documents/{doc_id}/page/{page_num}")
-async def render_page(doc_id: str, page_num: int, q: str = ""):
-    """Render a tight cropped snippet of a PDF page with exact sentence highlights."""
+async def render_page(doc_id: str, page_num: int, q: str = "", page_end: int = -1):
+    """Render a full PDF page with sentence highlights.
+
+    When page_end > page_num and q is supplied, searches every page in the
+    range [page_num, page_end] (up to 6 pages) and renders whichever page has
+    the best text match — fixing the common case where the cited sentence is
+    not on the first page of a multi-page chunk.
+
+    Always returns the full page at 1.8×; no cropping.
+    """
     import fitz
     pdf_path = _get_pdf_path(doc_id)
     if pdf_path is None:
@@ -389,43 +513,27 @@ async def render_page(doc_id: str, page_num: int, q: str = ""):
     if page_num < 0 or page_num >= len(doc):
         raise HTTPException(400, f"Page {page_num} out of range (0–{len(doc)-1})")
 
-    page = doc[page_num]
-    page_rect = page.rect
-    matched_rects: list = []
+    # Find the page in the chunk range that best matches the quote
+    target_page_num = page_num
+    if q and page_end > page_num:
+        end = min(page_end, page_num + 5, len(doc) - 1)   # cap at 6 pages
+        best_count = _quote_match_count(doc[page_num], q)
+        for pn in range(page_num + 1, end + 1):
+            c = _quote_match_count(doc[pn], q)
+            if c > best_count:
+                best_count = c
+                target_page_num = pn
+            if best_count > 0 and c == 0:
+                break   # stop when we pass the match zone
+
+    page = doc[target_page_num]
 
     if q:
-        matched_rects = _find_quote_rects(page, q)
+        _find_quote_rects(page, q)   # adds highlight annotations to the page
 
-    if matched_rects:
-        # Tight bounding box over all matched rects
-        x0 = min(r.x0 for r in matched_rects)
-        y0 = min(r.y0 for r in matched_rects)
-        x1 = max(r.x1 for r in matched_rects)
-        y1 = max(r.y1 for r in matched_rects)
-
-        # Estimate a line height and add ~2.5 lines of context padding
-        line_h = max(12.0, (y1 - y0) / max(len(matched_rects), 1))
-        pad_v = max(36.0, line_h * 2.5)
-
-        clip = fitz.Rect(
-            max(page_rect.x0, x0 - 16),
-            max(page_rect.y0, y0 - pad_v),
-            min(page_rect.x1, x1 + 16),
-            min(page_rect.y1, y1 + pad_v),
-        )
-        # Ensure a minimum clip height so single-line hits are still readable
-        if (clip.y1 - clip.y0) < 56:
-            clip = fitz.Rect(clip.x0,
-                             max(page_rect.y0, clip.y0 - 18),
-                             clip.x1,
-                             min(page_rect.y1, clip.y1 + 18))
-
-        mat = fitz.Matrix(2.8, 2.8)
-        pix = page.get_pixmap(matrix=mat, clip=clip, colorspace=fitz.csRGB)
-    else:
-        # No match — render full page at modest scale as fallback
-        mat = fitz.Matrix(1.8, 1.8)
-        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+    # Always full page, 1.8×
+    mat = fitz.Matrix(1.8, 1.8)
+    pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
 
     png = pix.tobytes("png")
     doc.close()
@@ -472,17 +580,30 @@ async def list_presets():
 
 
 @app.post("/api/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    use_ocr: bool = Form(False),
+    background_tasks: BackgroundTasks = None,
+):
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files are supported")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     dest = DATA_DIR / file.filename
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
+
+    # Auto-start processing (same as POST /api/process)
+    placeholder = f"pending_{dest.stem}"
+    _emit(placeholder, "layout", "running", "Starting…")
+    if background_tasks is not None:
+        background_tasks.add_task(_run_full_pipeline, str(dest), placeholder, use_ocr)
+
     return {
         "filename": file.filename,
         "path": str(dest),
-        "message": f"Uploaded. POST /api/process to start processing.",
+        "placeholder_id": placeholder,
+        "use_ocr": use_ocr,
+        "message": "Uploaded and processing started.",
     }
 
 
@@ -512,7 +633,7 @@ def _emit(doc_id: str, stage: str, status: str, message: str = "") -> None:
     }
 
 
-def _run_full_pipeline(pdf_path: str, doc_id_hint: Optional[str]) -> None:
+def _run_full_pipeline(pdf_path: str, doc_id_hint: Optional[str], use_ocr: bool = False) -> None:
     """Run all pipeline stages for a PDF. Updates _processing_status throughout."""
     from nitrag.document_metadata_extractor import PyMuPDFLayoutExtractor
     from nitrag.clinical_metadata_extractor import ClinicalMetadataExtractor
@@ -527,9 +648,23 @@ def _run_full_pipeline(pdf_path: str, doc_id_hint: Optional[str]) -> None:
     _id = doc_id_hint or "pending"
 
     try:
-        # Stage 1 — layout
+        # Stage 1 — layout (with optional Google Vision OCR)
         _emit(_id, "layout", "running")
-        extractor = PyMuPDFLayoutExtractor(encoding_model_name="gpt-4o", root_dir=RAG_STORE_ROOT)
+        ocr_engine = None
+        if use_ocr:
+            try:
+                from nitrag.google_vision_ocr import GoogleVisionOCR
+                _ocr = GoogleVisionOCR()
+                if _ocr.is_available():
+                    ocr_engine = _ocr
+                    print(f"[pipeline] Google Vision OCR enabled for {pdf.name}")
+                else:
+                    print("[pipeline] Google Vision OCR requested but credentials unavailable — skipping")
+            except Exception as _oe:
+                print(f"[pipeline] Could not initialise Google Vision OCR: {_oe}")
+        extractor = PyMuPDFLayoutExtractor(
+            encoding_model_name="gpt-4o", root_dir=RAG_STORE_ROOT, ocr_engine=ocr_engine
+        )
         manifest = extractor.extract(pdf, overwrite=True)
         doc_dir = Path(manifest["paths"]["document_dir"])
         _id = doc_dir.name
@@ -592,6 +727,7 @@ def _run_full_pipeline(pdf_path: str, doc_id_hint: Optional[str]) -> None:
 class ProcessRequest(BaseModel):
     pdf_path: str
     config_preset: str = "openai_cloud"
+    use_ocr: bool = False
 
 
 @app.post("/api/process")
@@ -602,11 +738,10 @@ async def process_document(request: ProcessRequest, background_tasks: Background
     if not pdf.suffix.lower() == ".pdf":
         raise HTTPException(400, "Only PDF files are supported")
 
-    # Give a stable placeholder ID while we don't yet know the real doc_id
     placeholder = f"pending_{pdf.stem}"
     _emit(placeholder, "layout", "running", "Starting…")
 
-    background_tasks.add_task(_run_full_pipeline, str(pdf), placeholder)
+    background_tasks.add_task(_run_full_pipeline, str(pdf), placeholder, request.use_ocr)
     return {"status": "processing", "placeholder_id": placeholder, "pdf": pdf.name}
 
 
@@ -663,7 +798,7 @@ class QueryRequest(BaseModel):
     evaluate: bool = True
 
 
-def _serialize_response(response) -> Dict[str, Any]:
+def _serialize_response(response, sentence_citations=None) -> Dict[str, Any]:
     return {
         "query": response.query,
         "answer": response.answer,
@@ -680,6 +815,7 @@ def _serialize_response(response) -> Dict[str, Any]:
             }
             for c in response.citations
         ],
+        "sentence_citations": sentence_citations or [],
         "context": {
             "chunks": [
                 {
@@ -745,6 +881,13 @@ async def query_endpoint(request: QueryRequest):
             )
         raise HTTPException(500, err)
 
-    result = _serialize_response(response)
+    # Post-generation: map each answer sentence to exact source sentences
+    try:
+        from nitrag.generation_manager import build_sentence_citations
+        sent_cites = build_sentence_citations(response.answer, response.context)
+    except Exception:
+        sent_cites = []
+
+    result = _serialize_response(response, sentence_citations=sent_cites)
     result["doc_id"] = request.doc_id
     return result

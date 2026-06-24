@@ -164,11 +164,13 @@ class PyMuPDFLayoutExtractor:
         self,
         encoding_model_name: str = "gpt-4o",
         root_dir: Union[str, Path] = "rag_store",
+        ocr_engine=None,  # GoogleVisionOCR instance or None
     ):
         self.encoding_model_name = encoding_model_name
         self.encoding = tiktoken.encoding_for_model(encoding_model_name)
         self.root_dir = Path(root_dir)
         self.root_dir.mkdir(parents=True, exist_ok=True)
+        self.ocr_engine = ocr_engine  # injected by caller when use_ocr=True
 
     def extract(
         self,
@@ -488,6 +490,96 @@ class PyMuPDFLayoutExtractor:
                             np.asarray(sep_tokens, dtype=np.int32).tofile(token_file)
                         global_token_index += len(sep_tokens)
 
+                # ── Google Vision OCR injection ────────────────────────────────
+                # If this page has no native text and an OCR engine is provided,
+                # render the page, call Vision API, and inject the resulting text
+                # as block elements in the same token stream.
+                _ocr_injected = False
+                if self.ocr_engine is not None and global_token_index == page_start:
+                    try:
+                        import fitz as _fitz_local
+                        _ocr_mat = _fitz_local.Matrix(200 / 72, 200 / 72)
+                        _ocr_pix = page.get_pixmap(matrix=_ocr_mat, colorspace=_fitz_local.csRGB)
+                        _ocr_img = _ocr_pix.tobytes("png")
+                        _ocr_elems = self.ocr_engine.ocr_page_image(
+                            _ocr_img, page_number, page_width, page_height, 200 / 72
+                        )
+                        for _oe in _ocr_elems:
+                            _oe_text = (_oe.get("text") or "").strip()
+                            if not _oe_text:
+                                continue
+                            _oe_tokens = self.encoding.encode(_oe_text + "\n")
+                            if not _oe_tokens:
+                                continue
+                            _oe_start = global_token_index
+                            _oe_end = global_token_index + len(_oe_tokens)
+                            if token_file is not None:
+                                np.asarray(_oe_tokens, dtype=np.int32).tofile(token_file)
+                            global_token_index = _oe_end
+                            page_text_chars += len(_oe_text)
+                            page_block_count += 1
+                            _oe_bbox = (
+                                float(_oe.get("x0", 0)), float(_oe.get("y0", 0)),
+                                float(_oe.get("x1", page_width)), float(_oe.get("y1", page_height)),
+                            )
+                            elements.append({
+                                "element_id": element_id,
+                                "document_id": document_id,
+                                "element_type": "block",
+                                "page_number": page_number,
+                                "block_number": _oe.get("block_number", page_block_count - 1),
+                                "line_number": None,
+                                "start_index": _oe_start,
+                                "end_index": _oe_end,
+                                "token_length": _oe_end - _oe_start,
+                                "text_chars": len(_oe_text),
+                                "text_preview": _oe_text[:300],
+                                "x0": _oe_bbox[0], "y0": _oe_bbox[1],
+                                "x1": _oe_bbox[2], "y1": _oe_bbox[3],
+                                **bbox_features(_oe_bbox, page_width, page_height),
+                                **text_shape_features(_oe_text),
+                                "avg_font_size": None,
+                                "max_font_size": None,
+                                "dominant_font_name": "google_vision",
+                                "contains_bold": None,
+                                "contains_italic": None,
+                                "is_top_zone": _oe_bbox[1] / max(page_height, 1) < 0.15,
+                                "is_bottom_zone": _oe_bbox[3] / max(page_height, 1) > 0.85,
+                                "span_ids_json": safe_json_dumps([]),
+                                "child_element_ids_json": safe_json_dumps([]),
+                                "parent_element_id": None,
+                                "reading_order_index": page_block_count - 1,
+                                "heading_score_final": 0.0,
+                                "is_heading_candidate_final": False,
+                                "metadata_json": safe_json_dumps({
+                                    "source": "google_vision",
+                                    "confidence": _oe.get("confidence"),
+                                }),
+                            })
+                            element_id += 1
+                            # Also inject word-level rows for word table
+                            for _wdict in (_oe.get("word_dicts") or []):
+                                _wtext = (_wdict.get("text") or "").strip()
+                                if _wtext:
+                                    words_out.append({
+                                        "word_id": word_id,
+                                        "document_id": document_id,
+                                        "page_number": page_number,
+                                        "block_number": _oe.get("block_number", 0),
+                                        "line_number": _wdict.get("line_number", 0),
+                                        "word_number": 0,
+                                        "text": _wtext,
+                                        "x0": float(_wdict.get("x0", 0)),
+                                        "y0": float(_wdict.get("y0", 0)),
+                                        "x1": float(_wdict.get("x1", page_width)),
+                                        "y1": float(_wdict.get("y1", page_height)),
+                                        "metadata_json": safe_json_dumps({"source": "google_vision"}),
+                                    })
+                                    word_id += 1
+                        _ocr_injected = bool(_ocr_elems)
+                    except Exception as _ocr_exc:
+                        print(f"[vision_ocr] page {page_number} OCR failed: {_ocr_exc}")
+
                 page_end = global_token_index
 
                 # -------------------------
@@ -621,9 +713,10 @@ class PyMuPDFLayoutExtractor:
                     "word_count": len(words),
                     "image_block_count": page_image_block_count,
                     "drawing_count": len(drawing_paths or []),
-                    "is_probably_scanned": bool((not has_text) and (page_image_block_count > 0 or len(image_infos or []) > 0 if 'image_infos' in locals() else False)),
+                    "is_probably_scanned": bool((not (page_end > page_start and not _ocr_injected)) and (page_image_block_count > 0 or len(image_infos or []) > 0 if 'image_infos' in locals() else False)),
                     "metadata_json": safe_json_dumps({
-                        "source": "pymupdf",
+                        "source": "google_vision" if _ocr_injected else "pymupdf",
+                        "ocr_injected": _ocr_injected,
                     }),
                 }
 

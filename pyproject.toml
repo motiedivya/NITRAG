@@ -21,6 +21,8 @@ dependencies = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
     "python-multipart>=0.0.9",
+    # OCR — Google Cloud Vision (scanned PDF support)
+    "google-cloud-vision>=3.7",
 ]
 
 [project.optional-dependencies]

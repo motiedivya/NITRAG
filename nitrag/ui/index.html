@@ -83,6 +83,9 @@ sup{line-height:0}
 .doc-dots{display:flex;gap:3px;margin-top:5px}
 .dot{width:5px;height:5px;border-radius:50%;background:#1E2D45}
 .dot.on{background:#38BDF8}
+.doc-del-btn{flex-shrink:0;background:none;border:none;color:#475569;font-size:13px;line-height:1;padding:3px 4px;border-radius:3px;cursor:pointer;opacity:0;transition:opacity .12s,color .1s;align-self:flex-start;margin-top:1px}
+.doc-card:hover .doc-del-btn{opacity:1}
+.doc-del-btn:hover{color:#F87171;background:rgba(239,68,68,.12)}
 .dot.rd{background:#34D399}
 .doc-badge{font-size:9.5px;font-weight:600;padding:1px 5px;border-radius:3px;background:#0D4429;color:#34D399;align-self:flex-start;flex-shrink:0;margin-top:2px}
 .doc-badge.partial{background:#2D1F0D;color:#F59E0B}
@@ -99,6 +102,10 @@ sup{line-height:0}
 #upload-btn{display:flex;align-items:center;gap:7px;width:100%;padding:7px 10px;border-radius:var(--r);color:var(--sidebar-text);font-size:12.5px;border:1px dashed var(--sidebar-bd);cursor:pointer;background:transparent;margin-top:8px;transition:all .12s}
 #upload-btn:hover{border-color:#60A5FA;color:#60A5FA;background:var(--sidebar-hover)}
 #file-input{display:none}
+.ocr-toggle{display:flex;align-items:center;gap:6px;margin-top:5px;cursor:pointer;user-select:none}
+.ocr-toggle input[type=checkbox]{accent-color:#38BDF8;width:12px;height:12px;cursor:pointer;flex-shrink:0}
+.ocr-toggle-label{font-size:11px;color:var(--sidebar-text);transition:color .1s}
+.ocr-toggle:hover .ocr-toggle-label{color:#93C5FD}
 
 /* config */
 .cfg-sel{width:100%;background:#0F1F33;color:var(--sidebar-hi);border:1px solid var(--sidebar-bd);border-radius:var(--r);padding:7px 10px;font-size:12px;cursor:pointer;outline:none;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748B' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:28px}
@@ -290,6 +297,11 @@ sup{line-height:0}
 .cite-quote.exp{max-height:none}
 .cq-fade{position:absolute;bottom:0;left:0;right:0;height:28px;background:linear-gradient(to bottom,transparent,var(--bg));pointer-events:none}
 .cq-toggle{font-size:10.5px;color:var(--primary);cursor:pointer;margin-top:3px;display:inline-block}
+/* answer sentence that references this citation */
+.cite-ans-lbl{font-size:10px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin-bottom:3px;margin-top:8px}
+.cite-ans-sent{font-size:12px;color:var(--text);line-height:1.5;background:#EFF6FF;border-left:3px solid #3B82F6;border-radius:0 4px 4px 0;padding:5px 9px;margin-bottom:4px;font-style:italic}
+/* source quote */
+.cite-src-lbl2{font-size:10px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin-bottom:3px;margin-top:6px}
 .cite-tags{display:flex;gap:4px;flex-wrap:wrap;margin-top:4px}
 .tg{font-size:10px;font-weight:600;letter-spacing:.3px;padding:1px 6px;border-radius:3px}
 .tg-m{background:var(--tag-med-bg);color:var(--tag-med)}
@@ -334,10 +346,8 @@ sup{line-height:0}
 #img-lightbox{display:none;position:fixed;inset:0;z-index:300;align-items:center;justify-content:center;background:rgba(0,0,0,.82)}
 #img-lightbox.open{display:flex}
 #lbox-inner{position:relative;max-width:92vw;max-height:92vh;display:flex;flex-direction:column;align-items:center;gap:10px}
-#lbox-scroll{overflow:auto;max-width:90vw;max-height:80vh;border-radius:6px;background:#fff;cursor:zoom-in}
-#lbox-scroll.zoomed{cursor:grab}
-#lbox-scroll.zoomed:active{cursor:grabbing}
-#lbox-img{display:block;transition:transform .15s ease;transform-origin:center center}
+#lbox-scroll{overflow:auto;width:90vw;max-width:1300px;height:82vh;border-radius:6px;background:#fff}
+#lbox-img{display:block;width:100%;height:auto;transition:width .12s ease;cursor:default}
 .lbox-bar{display:flex;align-items:center;gap:8px}
 .lbox-btn{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:6px;background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.18);font-size:16px;font-weight:700;cursor:pointer;transition:background .12s;user-select:none}
 .lbox-btn:hover{background:rgba(255,255,255,.22)}
@@ -363,6 +373,10 @@ sup{line-height:0}
           Upload PDF
         </label>
         <input type="file" id="file-input" accept=".pdf">
+        <label class="ocr-toggle" title="Use Google Vision OCR for scanned/image-only PDFs">
+          <input type="checkbox" id="ocr-checkbox">
+          <span class="ocr-toggle-label">Use OCR (scanned PDFs)</span>
+        </label>
       </div>
 
       <!-- Config -->
@@ -588,6 +602,7 @@ const E = {
   stagesList: $('stages-list'),
   exQs:       $('example-queries'),
   fileInput:  $('file-input'),
+  ocrCheckbox: $('ocr-checkbox'),
   cfgSel:     $('config-select'),
   toast:      $('toast'),
   newQBtn:    $('new-query-btn'),
@@ -647,9 +662,13 @@ function bindEvents() {
   $('lbox-zoom-out').addEventListener('click', () => stepZoom(-0.25));
   $('lbox-zoom-reset').addEventListener('click', () => setZoom(1));
   E.lbox.addEventListener('click', e => { if (e.target === E.lbox || e.target.id === 'lbox-inner') closeLightbox(); });
+  // Ctrl+Scroll = zoom; plain scroll = scroll the page image
   E.lboxScroll.addEventListener('wheel', e => {
-    e.preventDefault();
-    stepZoom(e.deltaY < 0 ? 0.15 : -0.15);
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      stepZoom(e.deltaY < 0 ? 0.18 : -0.18);
+    }
+    // else: browser handles the scroll naturally inside #lbox-scroll
   }, {passive: false});
 
   // Evidence tabs
@@ -706,6 +725,8 @@ function bindEvents() {
 
   // Doc list click
   E.docList.addEventListener('click', e => {
+    const delBtn = e.target.closest('.doc-del-btn');
+    if (delBtn) { deleteDoc(delBtn.dataset.id); return; }
     const card = e.target.closest('.doc-card');
     if (card) selectDoc(card.dataset.id);
   });
@@ -733,35 +754,53 @@ function openLightbox(src, label) {
   E.lboxImg.src = src;
   E.lboxLabel.textContent = label || '';
   _lboxScale = 1;
-  E.lboxImg.style.transform = 'scale(1)';
-  E.lboxScroll.classList.remove('zoomed');
+  E.lboxImg.style.width = '100%';
+  E.lboxScroll.scrollTop = 0;
+  E.lboxScroll.scrollLeft = 0;
   E.lboxZoomVal.textContent = '100%';
   E.lbox.classList.add('open');
 }
 
 function closeLightbox() {
   E.lbox.classList.remove('open');
-  // clear src to stop any pending load
   E.lboxImg.src = '';
 }
 
 function setZoom(scale) {
-  _lboxScale = Math.max(0.5, Math.min(6, scale));
-  E.lboxImg.style.transform = `scale(${_lboxScale})`;
+  _lboxScale = Math.max(0.4, Math.min(8, scale));
+  // Width-based zoom: 100% = fit container, 200% = 2× scroll
+  E.lboxImg.style.width = Math.round(_lboxScale * 100) + '%';
   E.lboxZoomVal.textContent = Math.round(_lboxScale * 100) + '%';
-  E.lboxScroll.classList.toggle('zoomed', _lboxScale > 1);
 }
 
 function stepZoom(delta) { setZoom(_lboxScale + delta); }
 
 // ─── Documents ───────────────────────────────────────────────────────────────
-async function loadDocs() {
+async function deleteDoc(id) {
+  const doc = S.docs.find(d => d.doc_id === id);
+  const name = doc ? (doc.source_name || id) : id;
+  if (!confirm(`Delete "${name}"?\n\nThis removes all pipeline data and cannot be undone.`)) return;
+  try {
+    const r = await fetch(`/api/documents/${encodeURIComponent(id)}`, {method: 'DELETE'});
+    if (!r.ok) { const e = await r.json(); alert(`Delete failed: ${e.detail || r.status}`); return; }
+    if (S.docId === id) {
+      S.docId = null; S.doc = null; S.response = null; S.histIdx = -1;
+      showWelcome();
+    }
+    await loadDocs({autoSelect: false});
+  } catch(err) {
+    alert(`Delete failed: ${err.message}`);
+  }
+}
+
+async function loadDocs({autoSelect = true} = {}) {
   try {
     const r = await fetch('/api/documents');
     const d = await r.json();
     S.docs = d.documents || [];
     renderDocs();
-    if (S.docs.length > 0) selectDoc(S.docs[0].doc_id);
+    if (autoSelect && S.docs.length > 0 && !S.docId) selectDoc(S.docs[0].doc_id);
+    else renderDocs();
   } catch { E.docList.innerHTML = '<div class="no-docs">Could not reach server.</div>'; }
 }
 
@@ -788,6 +827,7 @@ function renderDocs() {
         <div class="doc-dots">${dots}</div>
       </div>
       ${badge}
+      <button class="doc-del-btn" data-id="${d.doc_id}" title="Delete document">&#x2715;</button>
     </div>`;
   }).join('');
 }
@@ -1096,35 +1136,75 @@ function renderCitations() {
   const cites = S.response.citations || [];
   E.epCount.textContent = cites.length;
   if (!cites.length) { E.epBody.innerHTML = '<div class="ep-empty"><div class="ep-empty-icon">📋</div>No citations in this answer</div>'; return; }
+
   const byN = {};
   (S.response.context?.chunks||[]).forEach(ch => { byN[ch.citation_number] = ch; });
+
+  // Build map: citation_number → list of answer sentences that reference it
+  const citedByN = {};
+  (S.response.sentence_citations||[]).forEach(sc => {
+    (sc.citations||[]).forEach(c => {
+      const n = c.citation_number;
+      if (!citedByN[n]) citedByN[n] = [];
+      // Deduplicate sentences
+      if (!citedByN[n].find(x => x.sentence === sc.sentence))
+        citedByN[n].push({ sentence: sc.sentence, quote: c.quote, score: c.score });
+    });
+  });
+
   const docId = S.response.doc_id || S.docId || '';
   E.epBody.innerHTML = cites.map(c => {
     const ch = byN[c.number]||{};
     const page = c.page_start===c.page_end ? `Page ${c.page_start+1}` : `Pages ${c.page_start+1}–${c.page_end+1}`;
     const pct = Math.round((c.confidence||0)*100);
     const cc = pct>=60?'':pct>=30?'m':'l';
-    const quote = c.quote||'';
-    // PDF page rendering
+
+    // Use the precise source quote from the citation (sentence-matched)
+    const quote = c.quote || '';
+
+    // The answer sentences that drove this citation (from sentence_citations post-step)
+    const ansSents = citedByN[c.number] || [];
+
+    const pageEnd = (c.page_end != null && c.page_end >= c.page_start) ? c.page_end : c.page_start;
     const pageImgUrl = docId
-      ? `/api/documents/${encodeURIComponent(docId)}/page/${c.page_start}?q=${encodeURIComponent(quote.slice(0,600))}`
+      ? `/api/documents/${encodeURIComponent(docId)}/page/${c.page_start}` +
+        (quote ? `?q=${encodeURIComponent(quote.slice(0,600))}&page_end=${pageEnd}` : '')
       : '';
     const pdfUrl = docId
       ? `/api/documents/${encodeURIComponent(docId)}/pdf#page=${c.page_start+1}`
       : '';
+
+    // Answer sentence(s) that reference this citation
+    const ansSentsHtml = ansSents.length
+      ? `<div class="cite-ans-lbl">From your answer</div>
+         ${ansSents.slice(0,2).map(x => `<div class="cite-ans-sent">${esc(x.sentence.replace(/\[\d+\]/g,'').trim())}</div>`).join('')}`
+      : '';
+
+    // Source quote from the chunk
+    const quoteHtml = quote
+      ? `<div class="cite-src-lbl2">Source text</div>
+         <div class="cite-quote" style="margin-top:0">
+           ${esc(quote)}
+           <div class="cq-fade"></div>
+         </div>
+         <span class="cq-toggle" role="button" tabindex="0" title="Toggle source text">Show more</span>`
+      : '';
+
     return `<div class="cite-card" data-n="${c.number}" id="cc-${c.number}" tabindex="0">
       <div class="cc-hd">
         <div class="cite-num">${c.number}</div>
         <div class="cite-src">
-          <div class="cite-src-lbl">${esc(c.source_label||page)}</div>
+          <div class="cite-src-lbl">${esc(c.source_label||'')}${c.source_label?'':esc(page)}</div>
           <div class="cite-pg">${esc(page)}${c.section?' · '+esc(c.section.slice(0,40)):''}</div>
         </div>
-        ${pdfUrl ? `<a href="${pdfUrl}" target="_blank" class="pdf-open-btn" title="Open in PDF">
+        ${pdfUrl ? `<a href="${pdfUrl}" target="_blank" class="pdf-open-btn" title="Open page in PDF viewer">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
         </a>` : ''}
       </div>
-      <div class="conf-row"><div class="conf-bw"><div class="conf-b ${cc}" style="width:${pct}%"></div></div><span class="conf-v">${pct}%</span></div>
-      ${pageImgUrl ? `<div class="cite-pdf-wrap" title="Click to zoom • Opens at full resolution" onclick="openLightbox('${pageImgUrl}','${esc(page)}')">
+      <div class="conf-row"><div class="conf-bw"><div class="conf-b ${cc}" style="width:${pct}%"></div></div><span class="conf-v">${pct}% match</span></div>
+      ${ansSentsHtml}
+      ${quoteHtml}
+      ${pageImgUrl ? `<div class="cite-pdf-wrap" title="Click to zoom" onclick="openLightbox('${pageImgUrl}','${esc(page)}')">
         <img src="${pageImgUrl}" loading="lazy" class="cite-pdf-img" alt="${esc(page)}"
           onerror="this.closest('.cite-pdf-wrap').style.display='none'">
       </div>` : ''}
@@ -1228,24 +1308,18 @@ function loadHistoryItem(idx) {
 // ─── Upload & process ─────────────────────────────────────────────────────────
 async function handleUpload(e) {
   const file = e.target.files[0]; if (!file) return;
+  const useOcr = E.ocrCheckbox ? E.ocrCheckbox.checked : false;
   const form = new FormData();
   form.append('file', file);
-  toast('Uploading…');
+  form.append('use_ocr', useOcr ? 'true' : 'false');
+  toast(useOcr ? 'Uploading with Google Vision OCR…' : 'Uploading…');
   try {
     const r = await fetch('/api/upload', {method:'POST', body:form});
     const d = await r.json();
     if (!r.ok) throw new Error(d.detail||'Upload failed');
     E.fileInput.value = '';
-    // Ask to process
-    toast(`Uploaded "${file.name}". Starting processing…`, 'success');
-    const pr = await fetch('/api/process', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({pdf_path: d.path}),
-    });
-    const pd = await pr.json();
-    if (!pr.ok) throw new Error(pd.detail||'Process start failed');
-    openProcessingModal(pd.placeholder_id, file.name);
+    toast(`Uploaded "${file.name}". Processing started…`, 'success');
+    openProcessingModal(d.placeholder_id, file.name);
     await loadDocs();
   } catch(err) {
     toast(err.message, 'error');
