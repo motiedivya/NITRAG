@@ -679,11 +679,14 @@ def _run_full_pipeline(pdf_path: str, doc_id_hint: Optional[str], use_ocr: bool 
         ClinicalMetadataExtractor(doc_dir).run()
 
         # Stage 3 — chunking
-        # overwrite=True because stage 1 already created the doc directory;
-        # ingest_pdf needs to write manifest.json into it.
+        # Stage 1 (layout extractor) already wrote tokens.i32, pages.parquet,
+        # elements.parquet, and manifest.json — including any OCR text.
+        # Loading from those files preserves OCR output; re-ingesting via
+        # ingest_pdf() would overwrite tokens with PyMuPDF-only output and
+        # discard all OCR text, producing zero chunks for scanned documents.
         _emit(_id, "chunks", "running")
         store = PdfTokenStore(encoding_model_name="gpt-4o", root_dir=RAG_STORE_ROOT)
-        store.ingest_pdf(pdf, overwrite=True)
+        store.load(_id)
         mgr = ChunkManager(store)
         register_default_chunkers(mgr)
         mgr.execute_all(continue_on_error=True)

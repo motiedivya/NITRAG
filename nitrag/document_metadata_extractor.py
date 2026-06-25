@@ -811,6 +811,37 @@ class PyMuPDFLayoutExtractor:
             encoding="utf-8",
         )
 
+        # Write PdfTokenStore-compatible aliases so ChunkManager can load
+        # directly from this extractor's output without re-ingesting via
+        # PdfTokenStore.ingest_pdf() (which would lose OCR data).
+        import shutil as _shutil
+        _store_pages = document_dir / "pages.parquet"
+        _store_elements = document_dir / "elements.parquet"
+        _shutil.copy2(str(paths["pages"]), str(_store_pages))
+        _shutil.copy2(str(paths["elements"]), str(_store_elements))
+        _chunks_dir = document_dir / "chunks"
+        _chunks_dir.mkdir(parents=True, exist_ok=True)
+        (document_dir / "manifest.json").write_text(
+            json.dumps({
+                "document_id": document_id,
+                "source_pdf_path": str(pdf_path),
+                "source_pdf_name": pdf_path.name,
+                "source_sha256": file_hash,
+                "encoding_model_name": self.encoding_model_name,
+                "total_tokens": global_token_index,
+                "total_pages": len(pages),
+                "total_elements": len(elements),
+                "tokens_path": str(paths["tokens"]),
+                "pages_path": str(_store_pages),
+                "elements_path": str(_store_elements),
+                "chunks_dir": str(_chunks_dir),
+                "created_at": started_at,
+                "finished_at": finished_at,
+                "storage_version": "v1_memmap_tokens_parquet_metadata",
+            }, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
         print("Layout extraction complete.")
         print(f"Document ID: {document_id}")
         print(f"Pages: {len(pages)}")
