@@ -39,8 +39,8 @@ class LLMConfig:
     "anthropic"           — Anthropic SDK (claude-sonnet-4-6, claude-haiku-4-5…)
     """
     provider: str = "openai_compatible"
-    model_name: str = "llama3.1:8b"
-    base_url: Optional[str] = "http://localhost:11434/v1"   # None = OpenAI default
+    model_name: str = "gpt-4o"
+    base_url: Optional[str] = None                          # None = OpenAI default
     api_key: Optional[str] = None
     temperature: float = 0.1
     max_tokens: int = 2048

@@ -207,24 +207,79 @@ def _doc_info(doc_dir: Path) -> Optional[Dict[str, Any]]:
     }
 
 
+_NARRATIVE_QUERY = (
+    "Provide a comprehensive narrative summary of this entire clinical document, "
+    "covering all patients, findings, diagnoses, medications, treatments, and clinical plans."
+)
+
+
 def _generate_narrative_summary(doc_id: str) -> None:
     summary_path = RAG_STORE_ROOT / doc_id / "narrative_summary.json"
     if summary_path.exists():
         return
+
     from nitrag.rag_pipeline import RAGPipeline
     from nitrag.config import RAGConfig
+    from nitrag.chunk_manager import ChunkManager, register_default_chunkers
+    from nitrag.generation_manager import GenerationManager, resolve_citations
+
     store = _load_store(doc_id)
+
+    # Ensure sentence_based chunks exist (on-demand for already-processed docs)
+    sentence_chunk_path = store.paths.chunks_dir / "sentence_based.parquet"
+    if not sentence_chunk_path.exists():
+        print(f"[narrative] Building sentence_based chunks for {doc_id}…")
+        cm = ChunkManager(store)
+        register_default_chunkers(cm)
+        cm.execute("sentence_based")
+
     config = RAGConfig.openai_cloud()
     config.llm.system_prompt = NARRATIVE_SUMMARY_PROMPT
-    config.generation.max_context_tokens = 8000
-    config.retrieval.top_k_retrieve = 40
-    config.retrieval.top_k_rerank = 20
+    config.generation.max_context_tokens = 32000   # fit entire document
+    config.generation.context_ordering = "page"    # chronological order
+
     pipeline = RAGPipeline(store, config)
-    response = pipeline.answer(
-        "Provide a comprehensive narrative summary of this entire clinical document, "
-        "covering all patients, findings, diagnoses, medications, treatments, and clinical plans.",
-        evaluate=False,
+
+    # Pass 1: full-document narrative with all sentence chunks in page order
+    print(f"[narrative] Pass 1 — full-document generation for {doc_id}…")
+    response = pipeline.answer_full_document(
+        query=_NARRATIVE_QUERY,
+        chunk_strategy="sentence_based",
     )
+
+    # Pass 2: completeness check
+    print(f"[narrative] Pass 2 — completeness check for {doc_id}…")
+    completeness_prompt = (
+        "You are a medical editor reviewing a clinical narrative summary for completeness.\n\n"
+        "NARRATIVE SUMMARY:\n" + response.answer + "\n\n"
+        "SOURCE EVIDENCE (all sentences from the document):\n"
+        + response.context.formatted_text + "\n\n"
+        "Identify any clinical visits, diagnoses, procedures, medications, imaging results, "
+        "or dated events that appear in the SOURCE EVIDENCE but are NOT mentioned in the "
+        "NARRATIVE SUMMARY.\n"
+        "If the summary is complete, respond with exactly one word: COMPLETE\n"
+        "Otherwise list each missing item on its own line."
+    )
+    gen = GenerationManager(config.llm)
+    completeness_result = gen.generate_text(completeness_prompt)
+
+    if completeness_result and "COMPLETE" not in completeness_result.strip().upper()[:20]:
+        # Pass 3: fill gaps
+        print(f"[narrative] Pass 3 — filling gaps for {doc_id}…")
+        gap_prompt = (
+            "Extend the following medical narrative summary to include these missing items:\n\n"
+            "MISSING ITEMS:\n" + completeness_result + "\n\n"
+            "CURRENT SUMMARY:\n" + response.answer + "\n\n"
+            "Insert each missing item at the correct chronological location in the summary. "
+            "Every new or modified sentence must carry an inline [N] citation referencing "
+            "the evidence already numbered above."
+        )
+        refined = gen.generate_text_with_context(gap_prompt, response.context)
+        if refined:
+            response.answer = refined
+            response.generation_result.citations = resolve_citations(refined, response.context)
+            response.citations = response.generation_result.citations
+
     result = _serialize_response(response)
     result["doc_id"] = doc_id
     result["query"] = "Narrative Summary"
@@ -354,8 +409,7 @@ def _sentence_fragments(sentence: str) -> list:
 def _find_by_word_window(page, quote: str) -> list:
     """Word-level sliding-window match: robust fallback for OCR / whitespace gaps.
 
-    Finds the cluster of page words that best covers the distinctive words in
-    the quote, highlights those exact word bounding boxes.
+    Returns Rect objects only — caller is responsible for drawing.
     """
     import re
     import fitz
@@ -372,12 +426,10 @@ def _find_by_word_window(page, quote: str) -> list:
     page_norm = [re.sub(r"[^a-z0-9]", "", w[4].lower()) for w in page_words]
     n_p = len(page_words)
 
-    # Find anchor positions (any page word that is a quote word)
     anchors = [i for i, w in enumerate(page_norm) if w in q_set]
     if not anchors:
         return []
 
-    # For each anchor expand a window and compute recall of quote words
     win_radius = max(len(q_words) * 3, 20)
     best_score = 0.0
     best_start, best_end = 0, 0
@@ -399,16 +451,14 @@ def _find_by_word_window(page, quote: str) -> list:
     for i in range(best_start, best_end):
         if page_norm[i] in q_set:
             w = page_words[i]
-            r = fitz.Rect(w[0], w[1], w[2], w[3])
-            ann = page.add_highlight_annot(r)
-            ann.set_colors(stroke=[1.0, 0.85, 0.0])
-            ann.update()
-            matched.append(r)
+            matched.append(fitz.Rect(w[0], w[1], w[2], w[3]))
     return matched
 
 
 def _find_quote_rects(page, quote: str) -> list:
     """Three-strategy search for quote text.
+
+    Returns Rect objects only — caller is responsible for drawing highlights.
 
     1. Exact sentence/fragment search via PyMuPDF search_for()
     2. Word-level sliding window (robust to OCR / whitespace differences)
@@ -430,11 +480,7 @@ def _find_quote_rects(page, quote: str) -> list:
                 continue
             rects = page.search_for(frag)
             if rects:
-                for r in rects[:8]:
-                    ann = page.add_highlight_annot(r)
-                    ann.set_colors(stroke=[1.0, 0.85, 0.0])
-                    ann.update()
-                    matched.append(r)
+                matched.extend(rects[:8])
                 break
 
     if matched:
@@ -469,12 +515,130 @@ def _find_quote_rects(page, quote: str) -> list:
             best_rect = fitz.Rect(block[0], block[1], block[2], block[3])
 
     if best_rect and best_score >= 0.32:
-        ann = page.add_highlight_annot(best_rect)
-        ann.set_colors(stroke=[1.0, 0.85, 0.0])
-        ann.update()
         return [best_rect]
 
     return []
+
+
+def _draw_highlights(page, rects: list) -> None:
+    """Draw semi-transparent yellow highlight over rects using page shapes.
+
+    Uses new_shape/commit so the overlay renders reliably in get_pixmap(),
+    unlike highlight annotations which depend on PDF-level appearance streams.
+    """
+    if not rects:
+        return
+    import fitz
+    shape = page.new_shape()
+    for r in rects:
+        shape.draw_rect(fitz.Rect(r.x0, r.y0 - 1, r.x1, r.y1 + 1))
+    shape.finish(color=None, fill=(1.0, 0.88, 0.0), fill_opacity=0.45, width=0)
+    shape.commit()
+
+
+def _find_rects_from_layout(doc_id: str, page_num: int, quote: str) -> list:
+    """Fallback for scanned PDFs: match quote words against OCR layout element bboxes.
+
+    Uses layout_elements.parquet which stores pre-computed bounding boxes from
+    the OCR pipeline. Returns Rect objects for elements with >35% word overlap.
+    """
+    import re
+    import fitz
+
+    el_path = RAG_STORE_ROOT / doc_id / "layout_elements.parquet"
+    if not el_path.exists():
+        return []
+    try:
+        import pandas as pd
+        df = pd.read_parquet(el_path, columns=["page_number", "text_preview", "x0", "y0", "x1", "y1"])
+    except Exception:
+        return []
+
+    page_df = df[df["page_number"] == page_num]
+    if page_df.empty:
+        return []
+
+    q_words = {w for w in re.findall(r"[a-z]+", quote.lower())
+               if len(w) >= 4 and w not in _HIGHLIGHT_STOP}
+    if len(q_words) < 2:
+        return []
+
+    matched = []
+    for _, row in page_df.iterrows():
+        text = str(row.get("text_preview") or "")
+        if len(text) < 4:
+            continue
+        t_words = set(re.findall(r"[a-z]+", text.lower()))
+        overlap = len(q_words & t_words) / max(len(q_words), 1)
+        if overlap >= 0.35:
+            matched.append(fitz.Rect(float(row["x0"]), float(row["y0"]),
+                                     float(row["x1"]), float(row["y1"])))
+    return matched
+
+
+def _find_quote_rects_from_words(doc_id: str, page_num: int, quote: str) -> list:
+    """Primary highlight strategy: word-level bbox matching via layout_words.parquet.
+
+    More reliable than search_for() for GlyphLessFont / OCR-injected PDFs because
+    it uses pre-computed bboxes from ingestion instead of live PDF text extraction.
+    Returns one Rect per matched content word — caller draws highlights.
+    """
+    import re
+    import fitz
+
+    words_path = RAG_STORE_ROOT / doc_id / "layout_words.parquet"
+    if not words_path.exists():
+        return []
+    try:
+        import pandas as pd
+        df = pd.read_parquet(words_path, columns=["page_number", "text", "x0", "y0", "x1", "y1"])
+    except Exception:
+        return []
+
+    page_df = df[df["page_number"] == page_num].reset_index(drop=True)
+    if page_df.empty:
+        return []
+
+    def norm(w):
+        return re.sub(r"[^a-z0-9]", "", str(w).lower())
+
+    q_norm = [norm(w) for w in quote.split()]
+    # Prefer content words for scoring; fall back to all if too few
+    q_content = [w for w in q_norm if len(w) >= 3 and w not in _HIGHLIGHT_STOP]
+    if len(q_content) < 2:
+        q_content = [w for w in q_norm if w]
+    if not q_content:
+        return []
+    q_set = set(q_content)
+
+    p_texts = page_df["text"].tolist()
+    p_norm = [norm(w) for w in p_texts]
+    n_p = len(p_norm)
+    n_q = len(q_norm)
+    if n_p < 2 or n_q < 1:
+        return []
+
+    # Sliding window: allow ~25% slack for OCR-inserted noise words
+    win = min(n_q + max(4, n_q // 4), n_p)
+
+    best_score, best_i = 0.0, 0
+    for i in range(n_p - win + 1):
+        hits = sum(1 for w in p_norm[i:i + win] if w in q_set)
+        score = hits / len(q_set)
+        if score > best_score:
+            best_score = score
+            best_i = i
+
+    if best_score < 0.40:
+        return []
+
+    rects = []
+    for k in range(best_i, min(best_i + win, n_p)):
+        if p_norm[k] in q_set:
+            row = page_df.iloc[k]
+            rects.append(fitz.Rect(float(row["x0"]), float(row["y0"]),
+                                   float(row["x1"]), float(row["y1"])))
+    return rects
 
 
 def _quote_match_count(page, quote: str) -> int:
@@ -492,15 +656,15 @@ def _quote_match_count(page, quote: str) -> int:
 
 
 @app.get("/api/documents/{doc_id}/page/{page_num}")
-async def render_page(doc_id: str, page_num: int, q: str = "", page_end: int = -1):
-    """Render a full PDF page with sentence highlights.
+async def render_page(doc_id: str, page_num: int, q: str = "", page_end: int = -1, crop: int = 0):
+    """Render a PDF page with highlighted quote.
 
-    When page_end > page_num and q is supplied, searches every page in the
-    range [page_num, page_end] (up to 6 pages) and renders whichever page has
-    the best text match — fixing the common case where the cited sentence is
-    not on the first page of a multi-page chunk.
+    When page_end > page_num and q is supplied, searches the page range for
+    the best match. Highlights are drawn as filled shapes (reliable rendering).
 
-    Always returns the full page at 1.8×; no cropping.
+    crop=1: crops the pixmap to the highlighted region ± 80pt padding (for
+    citation card thumbnails). crop=0: returns the full page at 1.8× (for
+    the lightbox / PDF viewer).
     """
     import fitz
     pdf_path = _get_pdf_path(doc_id)
@@ -516,7 +680,7 @@ async def render_page(doc_id: str, page_num: int, q: str = "", page_end: int = -
     # Find the page in the chunk range that best matches the quote
     target_page_num = page_num
     if q and page_end > page_num:
-        end = min(page_end, page_num + 5, len(doc) - 1)   # cap at 6 pages
+        end = min(page_end, page_num + 5, len(doc) - 1)
         best_count = _quote_match_count(doc[page_num], q)
         for pn in range(page_num + 1, end + 1):
             c = _quote_match_count(doc[pn], q)
@@ -524,21 +688,93 @@ async def render_page(doc_id: str, page_num: int, q: str = "", page_end: int = -
                 best_count = c
                 target_page_num = pn
             if best_count > 0 and c == 0:
-                break   # stop when we pass the match zone
+                break
 
     page = doc[target_page_num]
 
+    highlight_rects: list = []
     if q:
-        _find_quote_rects(page, q)   # adds highlight annotations to the page
+        # Primary: word-level bboxes from layout_words.parquet (most accurate)
+        highlight_rects = _find_quote_rects_from_words(doc_id, target_page_num, q)
+        # Secondary: exact/fragment search via PyMuPDF search_for()
+        if not highlight_rects:
+            highlight_rects = _find_quote_rects(page, q)
+        # Tertiary: OCR layout element bboxes (block-level fallback)
+        if not highlight_rects:
+            highlight_rects = _find_rects_from_layout(doc_id, target_page_num, q)
+        _draw_highlights(page, highlight_rects)
 
-    # Always full page, 1.8×
     mat = fitz.Matrix(1.8, 1.8)
-    pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+
+    if crop and highlight_rects:
+        # Compute bounding box of all highlighted rects + 80pt vertical padding
+        bbox = highlight_rects[0]
+        for r in highlight_rects[1:]:
+            bbox = bbox | r
+        pad = 80
+        clip = fitz.Rect(
+            0,
+            max(0.0, bbox.y0 - pad),
+            page.rect.width,
+            min(page.rect.height, bbox.y1 + pad),
+        )
+        pix = page.get_pixmap(matrix=mat, clip=clip, colorspace=fitz.csRGB)
+    else:
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
 
     png = pix.tobytes("png")
     doc.close()
+    # No cache for cropped thumbnails (quote-dependent); full page can cache
+    cache = "no-store" if (crop and highlight_rects) else "public, max-age=3600"
     return Response(content=png, media_type="image/png",
-                    headers={"Cache-Control": "public, max-age=3600"})
+                    headers={"Cache-Control": cache})
+
+
+@app.get("/api/documents/{doc_id}/page/{page_num}/pdf")
+async def render_page_pdf(doc_id: str, page_num: int, q: str = ""):
+    """Return a single-page searchable PDF with highlight annotations.
+
+    The original text layer is preserved so the viewer can select and copy text.
+    Highlight annotations are added using add_highlight_annot() so they render
+    in any PDF viewer (browser-native or embedded iframe).
+    """
+    import fitz
+    pdf_path = _get_pdf_path(doc_id)
+    if pdf_path is None:
+        raise HTTPException(404, "Original PDF not found on disk")
+    try:
+        src = fitz.open(str(pdf_path))
+    except Exception as e:
+        raise HTTPException(500, f"Cannot open PDF: {e}")
+    if page_num < 0 or page_num >= len(src):
+        src.close()
+        raise HTTPException(400, f"Page {page_num} out of range (0–{len(src)-1})")
+
+    # Extract just this page into a fresh single-page document
+    out = fitz.open()
+    out.insert_pdf(src, from_page=page_num, to_page=page_num)
+    src.close()
+
+    page = out[0]
+
+    if q:
+        rects = _find_quote_rects_from_words(doc_id, page_num, q)
+        if not rects:
+            rects = _find_quote_rects(page, q)
+        if not rects:
+            rects = _find_rects_from_layout(doc_id, page_num, q)
+        if rects:
+            annot = page.add_highlight_annot(rects)
+            annot.set_colors(stroke=(1.0, 0.85, 0.0))  # yellow
+            annot.update()
+
+    pdf_bytes = out.tobytes()
+    out.close()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/documents/{doc_id}/summary")

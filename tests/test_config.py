@@ -56,9 +56,9 @@ class TestLLMConfigDefaults:
         cfg = LLMConfig()
         assert 0.0 <= cfg.temperature <= 0.5
 
-    def test_default_base_url_is_localhost(self):
+    def test_default_base_url_is_openai(self):
         cfg = LLMConfig()
-        assert cfg.base_url is not None and "localhost" in cfg.base_url
+        assert cfg.base_url is None  # None = OpenAI default endpoint
 
     def test_default_max_tokens_positive(self):
         cfg = LLMConfig()

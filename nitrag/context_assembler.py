@@ -17,6 +17,7 @@ Output
 """
 from __future__ import annotations
 
+import json
 import re
 import tiktoken
 from dataclasses import dataclass, field
@@ -49,6 +50,7 @@ class ContextChunk:
     contains_vital: bool = False
     clinical_quality_score: float = 0.0
     chunk_strategy_name: str = ""
+    sentence_index: int = -1
 
 
 @dataclass
@@ -136,7 +138,15 @@ class ContextAssembler:
             page_start = int(r.get("page_start") or 0)
             page_end = int(r.get("page_end") or page_start)
             section = str(r.get("primary_section") or "")
-            source_label = self._source_label(page_start, page_end, section)
+            meta_json = str(r.get("metadata_json") or "")
+            source_label = self._source_label(page_start, page_end, section, meta_json)
+
+            sentence_index = -1
+            if meta_json:
+                try:
+                    sentence_index = int(json.loads(meta_json).get("sentence_index", -1))
+                except Exception:
+                    pass
 
             citation_number = len(chosen) + 1
             chosen.append(ContextChunk(
@@ -156,7 +166,8 @@ class ContextAssembler:
                 contains_diagnosis=bool(r.get("contains_diagnosis")),
                 contains_vital=bool(r.get("contains_vital")),
                 clinical_quality_score=float(r.get("clinical_quality_score") or 0.0),
-                chunk_strategy_name=str(r.get("chunk_strategy_name") or ""),
+                chunk_strategy_name=str(r.get("chunk_strategy_name") or r.get("strategy_name") or ""),
+                sentence_index=sentence_index,
             ))
             used_tokens += token_count
 
@@ -256,11 +267,24 @@ class ContextAssembler:
             return len(text.split())
 
     @staticmethod
-    def _source_label(page_start: int, page_end: int, section: str) -> str:
+    def _source_label(
+        page_start: int,
+        page_end: int,
+        section: str,
+        metadata_json: str = "",
+    ) -> str:
         if page_start == page_end:
             page_str = f"Page {page_start + 1}"
         else:
             page_str = f"Pages {page_start + 1}–{page_end + 1}"
+        if metadata_json:
+            try:
+                meta = json.loads(metadata_json)
+                sidx = meta.get("sentence_index")
+                if sidx is not None:
+                    page_str = f"Sentence {int(sidx) + 1} | {page_str}"
+            except Exception:
+                pass
         if section:
             return f"{page_str} | {section}"
         return page_str

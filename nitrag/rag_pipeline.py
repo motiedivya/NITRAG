@@ -336,6 +336,73 @@ class RAGPipeline:
         )
 
     # ------------------------------------------------------------------
+    # Full-document answer (bypasses retrieval/reranking)
+    # ------------------------------------------------------------------
+
+    def answer_full_document(
+        self,
+        query: str,
+        chunk_strategy: str = "sentence_based",
+    ) -> RAGResponse:
+        """Generate an answer from ALL chunks in a strategy, ordered by page.
+
+        No BM25 / dense retrieval or reranking — every sentence in the document
+        is included in context order (chronological).  Ideal for narrative
+        summaries where completeness matters more than relevance ranking.
+        """
+        t0 = time.time()
+
+        # Load enriched chunks when available; fall back to plain chunks
+        enriched_path = self.store.paths.chunks_enriched_dir / f"{chunk_strategy}.parquet"
+        plain_path    = self.store.paths.chunks_dir / f"{chunk_strategy}.parquet"
+
+        from .chunk_manager import read_parquet_mmap
+        if enriched_path.exists():
+            rows: List[Dict[str, Any]] = read_parquet_mmap(enriched_path).to_pylist()
+        elif plain_path.exists():
+            rows = read_parquet_mmap(plain_path).to_pylist()
+        else:
+            raise FileNotFoundError(
+                f"No chunks parquet found for strategy '{chunk_strategy}'. "
+                "Run the chunker first."
+            )
+
+        # Chronological order: page first, then chunk_id (= sentence_index)
+        rows.sort(key=lambda r: (int(r.get("page_start") or 0), int(r.get("chunk_id") or 0)))
+
+        for r in rows:
+            r.setdefault("score", 1.0)
+            r.setdefault("rerank_score", 1.0)
+            r.setdefault("retriever_name", "full_document")
+            # Ensure strategy name propagates to ContextChunk
+            r.setdefault("chunk_strategy_name", chunk_strategy)
+
+        gc = self.config.generation
+        assembler = self._get_context_assembler()
+        context = assembler.assemble(rows, query=query, max_tokens=gc.max_context_tokens)
+
+        gen = self._get_generation_manager()
+        gen_result: GenerationResult = gen.answer(
+            query,
+            context,
+            min_citation_confidence=gc.min_citation_confidence,
+        )
+
+        latency_ms = round((time.time() - t0) * 1000, 1)
+        return RAGResponse(
+            query=query,
+            answer=gen_result.answer,
+            citations=gen_result.citations,
+            context=context,
+            retrieved_chunks=rows,
+            reranked_chunks=rows,
+            generation_result=gen_result,
+            evaluation=None,
+            latency={"full_document_ms": latency_ms, "total_ms": latency_ms},
+            config_snapshot={"chunk_strategy": chunk_strategy, "mode": "full_document"},
+        )
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

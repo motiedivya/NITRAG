@@ -45,6 +45,7 @@ class DocumentPaths:
     pages_path: Path
     elements_path: Path
     chunks_dir: Path
+    chunks_enriched_dir: Path
     manifest_path: Path
 
 
@@ -178,6 +179,7 @@ class PdfTokenStore:
             pages_path=document_dir / "pages.parquet",
             elements_path=document_dir / "elements.parquet",
             chunks_dir=document_dir / "chunks",
+            chunks_enriched_dir=document_dir / "chunks_enriched",
             manifest_path=document_dir / "manifest.json",
         )
         self.paths.chunks_dir.mkdir(parents=True, exist_ok=True)
@@ -409,6 +411,7 @@ class PdfTokenStore:
             pages_path=Path(manifest["pages_path"]),
             elements_path=Path(manifest["elements_path"]),
             chunks_dir=Path(manifest["chunks_dir"]),
+            chunks_enriched_dir=document_dir / "chunks_enriched",
             manifest_path=manifest_path,
         )
         self._tokens_memmap = None
@@ -1056,6 +1059,126 @@ def hierarchical_child_chunker_factory(
     return chunker
 
 
+def sentence_based_chunker(store: PdfTokenStore) -> List[ChunkSpan]:
+    """One sentence per chunk with a global sentence_index.
+
+    Uses block-level elements (the most granular unit available from the token
+    store).  Blocks are always single-page by construction, so page_start ==
+    page_end is guaranteed for every chunk produced here — which means the PDF
+    highlight endpoint can search the exact page with the exact quote text.
+
+    Large blocks (> SPLIT_THRESHOLD tokens) are split into individual sentences
+    via regex; each sentence is re-tokenised to carve out a precise sub-range
+    inside the block's [start_index, end_index].
+    """
+    import re
+    import tiktoken
+
+    SPLIT_THRESHOLD = 40   # blocks larger than this get sentence-split
+
+    # Prefer 'line' elements when available (finer granularity); fall back to 'block'
+    available_types = {e["element_type"] for e in store.elements()}
+    element_type = "line" if "line" in available_types else "block"
+    elements = store.elements(element_type=element_type)
+
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        enc = None
+
+    def tokenise(text: str) -> int:
+        if enc is None:
+            return len(text.split())
+        try:
+            return len(enc.encode(text, disallowed_special=()))
+        except Exception:
+            return len(text.split())
+
+    def split_sentences(text: str) -> List[str]:
+        """Split text into sentences, preserving medical abbreviations."""
+        # Split on sentence-ending punctuation followed by whitespace
+        parts = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text.strip())
+        result = []
+        for p in parts:
+            p = p.strip()
+            if p:
+                result.append(p)
+        return result or [text.strip()]
+
+    chunks: List[ChunkSpan] = []
+    sentence_idx = 0
+
+    for e in elements:
+        start = int(e["start_index"])
+        end   = int(e["end_index"])
+        tok_len = end - start
+        if tok_len <= 0:
+            continue
+
+        page_num = int(e["page_number"])
+        elem_id  = int(e["element_id"])
+
+        # Small blocks → keep as one chunk
+        if tok_len <= SPLIT_THRESHOLD or enc is None:
+            chunks.append(ChunkSpan(
+                start=start,
+                end=end,
+                kind="sentence",
+                metadata={
+                    "sentence_index":    sentence_idx,
+                    "page_number":       page_num,
+                    "source_element_id": elem_id,
+                },
+            ))
+            sentence_idx += 1
+            continue
+
+        # Large blocks → decode and split into sentences
+        full_text = store.decode_span(start, end)
+        sents = split_sentences(full_text)
+
+        if len(sents) <= 1:
+            # Can't split — keep whole block
+            chunks.append(ChunkSpan(
+                start=start,
+                end=end,
+                kind="sentence",
+                metadata={
+                    "sentence_index":    sentence_idx,
+                    "page_number":       page_num,
+                    "source_element_id": elem_id,
+                },
+            ))
+            sentence_idx += 1
+            continue
+
+        # Allocate sub-ranges proportionally by re-tokenised sentence length
+        sent_lens = [tokenise(s) for s in sents]
+        total_sent_toks = sum(sent_lens) or 1
+        cur = start
+        for i, (s, s_len) in enumerate(zip(sents, sent_lens)):
+            if i == len(sents) - 1:
+                sub_end = end
+            else:
+                sub_end = cur + max(1, round(tok_len * s_len / total_sent_toks))
+                sub_end = min(sub_end, end - (len(sents) - i - 1))
+            chunks.append(ChunkSpan(
+                start=cur,
+                end=sub_end,
+                kind="sentence",
+                metadata={
+                    "sentence_index":    sentence_idx,
+                    "page_number":       page_num,
+                    "source_element_id": elem_id,
+                    "sentence_text":     s[:200],  # for debugging
+                },
+            ))
+            sentence_idx += 1
+            cur = sub_end
+
+    return chunks
+
+
 def register_default_chunkers(manager: ChunkManager) -> None:
     manager.register_chunker(
         "fixed_512",
@@ -1097,6 +1220,12 @@ def register_default_chunkers(manager: ChunkManager) -> None:
         "line_based_debug",
         element_chunker_factory(element_type="line"),
         description="One PDF text line per chunk. Useful for debugging.",
+    )
+
+    manager.register_chunker(
+        "sentence_based",
+        sentence_based_chunker,
+        description="One PDF line per chunk with global sentence_index for precise citation.",
     )
 
     manager.register_chunker(

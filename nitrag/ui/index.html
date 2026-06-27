@@ -95,6 +95,7 @@ sup{line-height:0}
 /* processing bar in card */
 .proc-bar-wrap{height:3px;background:#1E2D45;border-radius:2px;margin-top:5px;overflow:hidden}
 .proc-bar{height:100%;background:#38BDF8;border-radius:2px;transition:width .5s;animation:indeterminate 1.5s ease-in-out infinite}
+.doc-stage{font-size:10.5px;color:#38BDF8;margin-top:3px;font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}
 @keyframes indeterminate{0%{transform:translateX(-100%);width:60%}100%{transform:translateX(200%);width:60%}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 
@@ -217,7 +218,7 @@ sup{line-height:0}
 .answer-text .md-h3{font-size:13.5px;font-weight:700;color:var(--text);margin:14px 0 5px}
 .answer-text .md-h4{font-size:13px;font-weight:600;color:var(--muted);margin:10px 0 4px;text-transform:uppercase;letter-spacing:.4px;font-size:11px}
 .answer-text .md-h2:first-child,.answer-text .md-h3:first-child{margin-top:0}
-.answer-text .md-p{margin:0 0 6px;line-height:1.75}
+.answer-text .md-p{margin:0 0 6px;line-height:1.75;border-radius:4px}
 .answer-text .md-p:last-child{margin-bottom:0}
 .answer-text .md-gap{height:8px}
 .answer-text .md-ul,.answer-text .md-ol{margin:4px 0 8px 18px;padding:0}
@@ -342,17 +343,16 @@ sup{line-height:0}
 .toast.error{background:var(--error)}
 .toast.success{background:var(--success)}
 
-/* ── Image lightbox ─────────────────────────────────────────── */
+/* ── PDF lightbox ───────────────────────────────────────────── */
 #img-lightbox{display:none;position:fixed;inset:0;z-index:300;align-items:center;justify-content:center;background:rgba(0,0,0,.82)}
 #img-lightbox.open{display:flex}
 #lbox-inner{position:relative;max-width:92vw;max-height:92vh;display:flex;flex-direction:column;align-items:center;gap:10px}
-#lbox-scroll{overflow:auto;width:90vw;max-width:1300px;height:82vh;border-radius:6px;background:#fff}
-#lbox-img{display:block;width:100%;height:auto;transition:width .12s ease;cursor:default}
+#lbox-scroll{width:90vw;max-width:1200px;height:84vh;border-radius:6px;overflow:hidden;background:#525659}
+#lbox-frame{width:100%;height:100%;border:none;display:block}
 .lbox-bar{display:flex;align-items:center;gap:8px}
 .lbox-btn{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:6px;background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.18);font-size:16px;font-weight:700;cursor:pointer;transition:background .12s;user-select:none}
 .lbox-btn:hover{background:rgba(255,255,255,.22)}
 #lbox-label{font-size:12px;color:rgba(255,255,255,.6);flex:1;text-align:center}
-#lbox-zoom-val{font-size:12px;color:rgba(255,255,255,.5);min-width:36px;text-align:center;font-family:var(--mono)}
 </style>
 
 <div id="app">
@@ -374,7 +374,7 @@ sup{line-height:0}
         </label>
         <input type="file" id="file-input" accept=".pdf">
         <label class="ocr-toggle" title="Use Google Vision OCR for scanned/image-only PDFs">
-          <input type="checkbox" id="ocr-checkbox">
+          <input type="checkbox" id="ocr-checkbox" checked>
           <span class="ocr-toggle-label">Use OCR (scanned PDFs)</span>
         </label>
       </div>
@@ -385,7 +385,7 @@ sup{line-height:0}
         <select id="config-select" class="cfg-sel">
           <option value="local_ollama">Local Ollama (llama3.1:8b)</option>
           <option value="fast_local">Fast Local (mistral:7b)</option>
-          <option value="openai_cloud">OpenAI Cloud (gpt-4o)</option>
+          <option value="openai_cloud" selected>OpenAI Cloud (gpt-4o)</option>
           <option value="medical_precise">Medical Precise (HyDE)</option>
         </select>
       </div>
@@ -522,15 +522,11 @@ sup{line-height:0}
   </div>
 </div>
 
-<!-- Image lightbox -->
+<!-- PDF lightbox -->
 <div id="img-lightbox">
   <div id="lbox-inner">
-    <div id="lbox-scroll"><img id="lbox-img" src="" alt=""></div>
+    <div id="lbox-scroll"><iframe id="lbox-frame" src="" title="PDF page preview" allowfullscreen></iframe></div>
     <div class="lbox-bar">
-      <button class="lbox-btn" id="lbox-zoom-out" title="Zoom out">−</button>
-      <span id="lbox-zoom-val">100%</span>
-      <button class="lbox-btn" id="lbox-zoom-in" title="Zoom in">+</button>
-      <button class="lbox-btn" id="lbox-zoom-reset" title="Reset zoom" style="font-size:11px">↺</button>
       <span id="lbox-label"></span>
       <button class="lbox-btn" id="lbox-close" title="Close (Esc)">✕</button>
     </div>
@@ -548,14 +544,16 @@ const S = {
   docs: [],
   docId: null,
   doc: null,
-  preset: 'local_ollama',
+  preset: 'openai_cloud',
   response: null,
   loading: false,
   tab: 'citations',
   history: [],          // [{query, response, docId, docName}]
   histIdx: -1,          // which history item is shown (-1 = fresh)
   procDocId: null,
+  procFilename: null,
   procTimer: null,
+  processingDocs: {}, // docId → { filename, currentStage }
 };
 
 const EX = [
@@ -616,9 +614,8 @@ const E = {
   sbToggle:   $('sb-toggle'),
   app:        $('app'),
   lbox:       $('img-lightbox'),
-  lboxImg:    $('lbox-img'),
+  lboxFrame:  $('lbox-frame'),
   lboxLabel:  $('lbox-label'),
-  lboxZoomVal:$('lbox-zoom-val'),
   lboxScroll: $('lbox-scroll'),
 };
 
@@ -658,18 +655,7 @@ function bindEvents() {
 
   // Lightbox events
   $('lbox-close').addEventListener('click', closeLightbox);
-  $('lbox-zoom-in').addEventListener('click', () => stepZoom(0.25));
-  $('lbox-zoom-out').addEventListener('click', () => stepZoom(-0.25));
-  $('lbox-zoom-reset').addEventListener('click', () => setZoom(1));
   E.lbox.addEventListener('click', e => { if (e.target === E.lbox || e.target.id === 'lbox-inner') closeLightbox(); });
-  // Ctrl+Scroll = zoom; plain scroll = scroll the page image
-  E.lboxScroll.addEventListener('wheel', e => {
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
-      stepZoom(e.deltaY < 0 ? 0.18 : -0.18);
-    }
-    // else: browser handles the scroll naturally inside #lbox-scroll
-  }, {passive: false});
 
   // Evidence tabs
   document.querySelectorAll('.ep-tab').forEach(t =>
@@ -681,13 +667,7 @@ function bindEvents() {
     })
   );
 
-  // Citation hover/click in answer
-  $('answer-area').addEventListener('mouseover', e => {
-    const r = e.target.closest('.cite-ref'); if (r) highlightCite(r.dataset.n, true);
-  });
-  $('answer-area').addEventListener('mouseout', e => {
-    const r = e.target.closest('.cite-ref'); if (r) highlightCite(r.dataset.n, false);
-  });
+  // Citation click in answer (no hover effect — hover caused layout reflow/vibration)
   $('answer-area').addEventListener('click', e => {
     const r = e.target.closest('.cite-ref');
     if (r) { scrollToCite(r.dataset.n); return; }
@@ -728,11 +708,18 @@ function bindEvents() {
     const delBtn = e.target.closest('.doc-del-btn');
     if (delBtn) { deleteDoc(delBtn.dataset.id); return; }
     const card = e.target.closest('.doc-card');
-    if (card) selectDoc(card.dataset.id);
+    if (card) {
+      if (S.processingDocs[card.dataset.id]) reopenProcModal(card.dataset.id);
+      else selectDoc(card.dataset.id);
+    }
   });
 
-  // Processing modal close
+  // Processing modal close — keep tracking in sidebar
   E.procCloseBtn.addEventListener('click', () => {
+    if (S.procDocId) {
+      S.processingDocs[S.procDocId] = { filename: S.procFilename || '', currentStage: null };
+      renderDocs();
+    }
     E.procModal.classList.remove('open');
   });
 }
@@ -748,32 +735,17 @@ function closeSidebar()  { E.app.classList.add('sb-closed'); }
 function openSidebar()   { E.app.classList.remove('sb-closed'); }
 
 // ─── Lightbox ─────────────────────────────────────────────────────────────────
-let _lboxScale = 1;
 
 function openLightbox(src, label) {
-  E.lboxImg.src = src;
+  E.lboxFrame.src = src;
   E.lboxLabel.textContent = label || '';
-  _lboxScale = 1;
-  E.lboxImg.style.width = '100%';
-  E.lboxScroll.scrollTop = 0;
-  E.lboxScroll.scrollLeft = 0;
-  E.lboxZoomVal.textContent = '100%';
   E.lbox.classList.add('open');
 }
 
 function closeLightbox() {
   E.lbox.classList.remove('open');
-  E.lboxImg.src = '';
+  E.lboxFrame.src = '';
 }
-
-function setZoom(scale) {
-  _lboxScale = Math.max(0.4, Math.min(8, scale));
-  // Width-based zoom: 100% = fit container, 200% = 2× scroll
-  E.lboxImg.style.width = Math.round(_lboxScale * 100) + '%';
-  E.lboxZoomVal.textContent = Math.round(_lboxScale * 100) + '%';
-}
-
-function stepZoom(delta) { setZoom(_lboxScale + delta); }
 
 // ─── Documents ───────────────────────────────────────────────────────────────
 async function deleteDoc(id) {
@@ -816,15 +788,26 @@ function renderDocs() {
     const isSel = S.docId === d.doc_id;
     const name = d.source_name || d.doc_id;
     const short = name.length > 24 ? name.slice(0,22)+'…' : name;
-    const badge = d.ready
-      ? '<span class="doc-badge">Ready</span>'
-      : '<span class="doc-badge partial">Partial</span>';
+    const procInfo = S.processingDocs[d.doc_id];
+    const badge = procInfo
+      ? '<span class="doc-badge processing">Processing</span>'
+      : d.ready
+        ? '<span class="doc-badge">Ready</span>'
+        : '<span class="doc-badge partial">Partial</span>';
+    const stageLabel = procInfo?.currentStage
+      ? `<div class="doc-stage">${procInfo.currentStage.replace(/_/g,' ')}…</div>`
+      : '';
+    const procBar = procInfo
+      ? '<div class="proc-bar-wrap"><div class="proc-bar"></div></div>'
+      : '';
     return `<div class="doc-card${isSel?' sel':''}" data-id="${d.doc_id}" title="${esc(name)}">
       <div class="doc-icon">PDF</div>
       <div class="doc-info">
         <div class="doc-nm">${esc(short)}</div>
         <div class="doc-meta">${d.total_pages?d.total_pages+'p':''}</div>
+        ${stageLabel}
         <div class="doc-dots">${dots}</div>
+        ${procBar}
       </div>
       ${badge}
       <button class="doc-del-btn" data-id="${d.doc_id}" title="Delete document">&#x2715;</button>
@@ -1088,7 +1071,9 @@ function fmtAnswer(raw) {
 
     if (!line.trim()) { out.push('<div class="md-gap"></div>'); continue; }
 
-    out.push(`<p class="md-p">${inlineMd(e(line))}</p>`);
+    const pCites = [...line.matchAll(/\[(\d+)\]/g)].map(m => m[1]);
+    const pCiteAttr = pCites.length ? ` data-cites="${pCites.join(',')}"` : '';
+    out.push(`<p class="md-p"${pCiteAttr}>${inlineMd(e(line))}</p>`);
   }
 
   closeList();
@@ -1156,6 +1141,7 @@ function renderCitations() {
   E.epBody.innerHTML = cites.map(c => {
     const ch = byN[c.number]||{};
     const page = c.page_start===c.page_end ? `Page ${c.page_start+1}` : `Pages ${c.page_start+1}–${c.page_end+1}`;
+    const hasSentRef = (c.source_label||'').startsWith('Sentence');
     const pct = Math.round((c.confidence||0)*100);
     const cc = pct>=60?'':pct>=30?'m':'l';
 
@@ -1166,9 +1152,16 @@ function renderCitations() {
     const ansSents = citedByN[c.number] || [];
 
     const pageEnd = (c.page_end != null && c.page_end >= c.page_start) ? c.page_end : c.page_start;
-    const pageImgUrl = docId
+    const pageBaseUrl = docId
       ? `/api/documents/${encodeURIComponent(docId)}/page/${c.page_start}` +
         (quote ? `?q=${encodeURIComponent(quote.slice(0,600))}&page_end=${pageEnd}` : '')
+      : '';
+    // Thumbnail: PNG cropped to highlighted region
+    const pageImgUrl = pageBaseUrl ? pageBaseUrl + (quote ? '&crop=1' : '') : '';
+    // Lightbox: single-page searchable PDF with highlight annotations
+    const pagePdfUrl = docId
+      ? `/api/documents/${encodeURIComponent(docId)}/page/${c.page_start}/pdf` +
+        (quote ? `?q=${encodeURIComponent(quote.slice(0,600))}` : '')
       : '';
     const pdfUrl = docId
       ? `/api/documents/${encodeURIComponent(docId)}/pdf#page=${c.page_start+1}`
@@ -1195,7 +1188,7 @@ function renderCitations() {
         <div class="cite-num">${c.number}</div>
         <div class="cite-src">
           <div class="cite-src-lbl">${esc(c.source_label||'')}${c.source_label?'':esc(page)}</div>
-          <div class="cite-pg">${esc(page)}${c.section?' · '+esc(c.section.slice(0,40)):''}</div>
+          <div class="cite-pg">${hasSentRef ? '' : esc(page)}${c.section?' · '+esc(c.section.slice(0,40)):''}</div>
         </div>
         ${pdfUrl ? `<a href="${pdfUrl}" target="_blank" class="pdf-open-btn" title="Open page in PDF viewer">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
@@ -1204,7 +1197,7 @@ function renderCitations() {
       <div class="conf-row"><div class="conf-bw"><div class="conf-b ${cc}" style="width:${pct}%"></div></div><span class="conf-v">${pct}% match</span></div>
       ${ansSentsHtml}
       ${quoteHtml}
-      ${pageImgUrl ? `<div class="cite-pdf-wrap" title="Click to zoom" onclick="openLightbox('${pageImgUrl}','${esc(page)}')">
+      ${pageImgUrl ? `<div class="cite-pdf-wrap" title="Click to open searchable PDF" onclick="openLightbox('${pagePdfUrl}','${esc(page)}')">
         <img src="${pageImgUrl}" loading="lazy" class="cite-pdf-img" alt="${esc(page)}"
           onerror="this.closest('.cite-pdf-wrap').style.display='none'">
       </div>` : ''}
@@ -1269,6 +1262,9 @@ function tags(ch) {
 // ─── Citation interaction ─────────────────────────────────────────────────────
 function highlightCite(n, on) {
   document.getElementById(`cc-${n}`)?.classList.toggle('active', on);
+  document.querySelectorAll('#answer-area .md-p[data-cites]').forEach(p => {
+    if (p.dataset.cites.split(',').includes(String(n))) p.classList.toggle('ans-hi', on);
+  });
 }
 
 function scrollToCite(n) {
@@ -1330,12 +1326,23 @@ async function handleUpload(e) {
 // ─── Processing modal ─────────────────────────────────────────────────────────
 function openProcessingModal(docId, filename) {
   S.procDocId = docId;
+  S.procFilename = filename;
   E.procSub.textContent = `Processing "${filename}"…`;
   E.procErrMsg.style.display = 'none';
   E.procErrMsg.textContent = '';
   renderProcStages(null, null);
   E.procModal.classList.add('open');
   pollProcessing(docId);
+}
+
+function reopenProcModal(docId) {
+  const info = S.processingDocs[docId];
+  if (!info) return;
+  E.procSub.textContent = `Processing "${info.filename}"…`;
+  E.procErrMsg.style.display = 'none';
+  if (info.currentStage) renderProcStages(info.currentStage, 'running');
+  E.procModal.classList.add('open');
+  if (!S.procTimer) { S.procDocId = docId; pollProcessing(docId); }
 }
 
 function renderProcStages(currentStage, statusType) {
@@ -1359,20 +1366,28 @@ function pollProcessing(docId) {
       // Handle placeholder → real doc_id resolution
       const realId = d.doc_id || docId;
       renderProcStages(d.current_stage, d.status);
+      // Update sidebar card stage label
+      if (S.processingDocs[docId]) {
+        S.processingDocs[docId].currentStage = d.current_stage;
+        renderDocs();
+      }
       // Show live message for narrative summary stage
       if (d.current_stage === 'narrative_summary' && d.status === 'running') {
         E.procSub.textContent = 'Generating Narrative Summary with GPT-4o…';
       }
       // Error on non-summary stage = hard failure
       if (d.status === 'error' && d.current_stage !== 'narrative_summary') {
-        clearInterval(S.procTimer);
+        clearInterval(S.procTimer); S.procTimer = null;
+        delete S.processingDocs[docId];
+        renderDocs();
         E.procErrMsg.textContent = d.message || 'An error occurred';
         E.procErrMsg.style.display = '';
         E.procSub.textContent = 'Processing failed';
         return;
       }
       if (d.done) {
-        clearInterval(S.procTimer);
+        clearInterval(S.procTimer); S.procTimer = null;
+        delete S.processingDocs[docId];
         const summaryFailed = d.current_stage === 'narrative_summary' && d.status === 'error';
         E.procSub.textContent = summaryFailed
           ? 'Document ready — Narrative Summary could not be generated'

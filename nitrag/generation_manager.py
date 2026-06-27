@@ -321,6 +321,20 @@ def resolve_citations(
         seen.add(n)
         c = chunk_by_citation[n]
 
+        # Sentence-level chunk: the chunk text IS the source sentence — no F1 needed
+        if c.chunk_strategy_name == "sentence_based":
+            citations.append(Citation(
+                number=n,
+                chunk_id=c.chunk_id,
+                page_start=c.page_start,
+                page_end=c.page_end,
+                section=c.section,
+                quote=c.text.strip(),
+                confidence=1.0,
+                source_label=c.source_label,
+            ))
+            continue
+
         # Match each answer sentence that references [N] against the chunk
         ans_sents_for_n = citation_to_sents.get(n, [])
         best_quote = ""
@@ -441,6 +455,22 @@ def build_sentence_citations(
             if n not in chunk_by_n:
                 continue
             c = chunk_by_n[n]
+
+            # Sentence-level chunk: use full chunk text directly
+            if c.chunk_strategy_name == "sentence_based":
+                sent_citations.append({
+                    "citation_number": n,
+                    "chunk_id":        c.chunk_id,
+                    "page_start":      c.page_start,
+                    "page_end":        c.page_end,
+                    "quote":           c.text.strip(),
+                    "score":           1.0,
+                    "section":         c.section,
+                    "source_label":    c.source_label,
+                    "inferred":        False,
+                })
+                continue
+
             quote, score = _best_matching_chunk_sentence(sent, c.text)
             if not quote:
                 quote = c.text[:300].strip()
@@ -634,3 +664,46 @@ class GenerationManager:
         assembler = ContextAssembler(store, gc)
         context = assembler.assemble(chunks, query, max_tokens=max_tokens)
         return self.answer(query, context, min_citation_confidence=min_citation_confidence)
+
+    # ------------------------------------------------------------------
+    # Plain-text LLM calls (no RAG context, no citation tracking)
+    # ------------------------------------------------------------------
+
+    def generate_text(self, prompt: str) -> str:
+        """Call the LLM with a single user prompt; return raw text."""
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            if isinstance(self.provider, (OpenAICompatibleProvider, AnthropicProvider)):
+                text, _ = self.provider.complete_with_usage(messages)
+            else:
+                text = str(self.provider.complete(messages, stream=False))
+            return text.strip()
+        except Exception:
+            return ""
+
+    def generate_text_with_context(
+        self,
+        prompt: str,
+        context: "AssembledContext",
+    ) -> str:
+        """Call the LLM with an existing assembled context injected as evidence.
+
+        The prompt should reference the evidence; citations in the response will
+        use the same [N] numbering already assigned in the context.
+        """
+        user_content = (
+            f"EVIDENCE:\n\n{context.formatted_text}"
+            f"\n\n{'─' * 60}\n\n{prompt}"
+        )
+        messages = [
+            {"role": "system", "content": self.config.system_prompt or MEDICAL_SYSTEM_PROMPT},
+            {"role": "user",   "content": user_content},
+        ]
+        try:
+            if isinstance(self.provider, (OpenAICompatibleProvider, AnthropicProvider)):
+                text, _ = self.provider.complete_with_usage(messages)
+            else:
+                text = str(self.provider.complete(messages, stream=False))
+            return text.strip()
+        except Exception:
+            return ""
