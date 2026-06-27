@@ -58,7 +58,7 @@ def _words_df(*page_words: tuple[int, str, float, float, float, float]) -> list[
 class TestFindQuoteRectsFromWords:
 
     def test_returns_tuple(self, tmp_path):
-        """`_find_quote_rects_from_words` always returns (int, list)."""
+        """`_find_quote_rects_from_words` always returns (int, list, list)."""
         doc_id = "test_doc"
         (tmp_path / doc_id).mkdir()
         _make_words_parquet(
@@ -67,13 +67,14 @@ class TestFindQuoteRectsFromWords:
         )
         with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
             result = _find_quote_rects_from_words(doc_id, 0, "Hello World")
-        assert isinstance(result, tuple) and len(result) == 2
-        best_page, rects = result
+        assert isinstance(result, tuple) and len(result) == 3
+        best_page, rects, triggers = result
         assert isinstance(best_page, int)
         assert isinstance(rects, list)
+        assert isinstance(triggers, list)
 
     def test_finds_exact_words_on_page(self, tmp_path):
-        """Matches content words and returns their bboxes."""
+        """Matched words on the same line collapse to a single full-line rect."""
         doc_id = "test_doc"
         (tmp_path / doc_id).mkdir()
         rows = _words_df(
@@ -83,9 +84,53 @@ class TestFindQuoteRectsFromWords:
         )
         _make_words_parquet(tmp_path / doc_id, rows)
         with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
-            page, rects = _find_quote_rects_from_words(doc_id, 0, "Patient prescribed metformin")
+            page, rects, triggers = _find_quote_rects_from_words(doc_id, 0, "Patient prescribed metformin")
         assert page == 0
-        assert len(rects) >= 2  # at least 2 content words matched
+        assert len(rects) == 1  # all three words are on the same line → one line rect
+        assert rects[0].x0 == pytest.approx(10, abs=1)
+        assert rects[0].x1 == pytest.approx(250, abs=1)
+
+    def test_line_expansion_spans_non_matched_words(self, tmp_path):
+        """The line rect includes words that were NOT in the query (whole-line highlight)."""
+        doc_id = "test_doc"
+        (tmp_path / doc_id).mkdir()
+        rows = _words_df(
+            (0, "The",    0, 50, 25, 62),
+            (0, "patient", 30, 50, 90, 62),
+            (0, "takes",   95, 50, 140, 62),
+            (0, "metformin", 145, 50, 240, 62),
+            (0, "daily.",  245, 50, 300, 62),
+        )
+        _make_words_parquet(tmp_path / doc_id, rows)
+        with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
+            page, rects, triggers = _find_quote_rects_from_words(doc_id, 0, "metformin")
+        assert page == 0
+        assert len(rects) == 1
+        # Rect spans full line from x=0 to x=300, not just the "metformin" word
+        assert rects[0].x0 == pytest.approx(0, abs=1)
+        assert rects[0].x1 == pytest.approx(300, abs=1)
+
+    def test_two_matched_lines_return_two_rects(self, tmp_path):
+        """Words matched on two distinct lines return two separate line rects."""
+        doc_id = "test_doc"
+        (tmp_path / doc_id).mkdir()
+        rows = _words_df(
+            # line 1 at y=0-12
+            (0, "Patient", 0, 0, 60, 12),
+            (0, "prescribed", 65, 0, 160, 12),
+            (0, "metformin", 165, 0, 250, 12),
+            # line 2 at y=20-32
+            (0, "Allergies", 0, 20, 80, 32),
+            (0, "Penicillin", 85, 20, 185, 32),
+            (0, "rash.", 190, 20, 230, 32),
+        )
+        _make_words_parquet(tmp_path / doc_id, rows)
+        with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
+            page, rects, triggers = _find_quote_rects_from_words(
+                doc_id, 0, "metformin prescribed Allergies Penicillin"
+            )
+        assert page == 0
+        assert len(rects) == 2  # one rect per matched line
 
     def test_no_match_returns_empty_rects(self, tmp_path):
         """Returns (page_num, []) when nothing matches."""
@@ -97,7 +142,7 @@ class TestFindQuoteRectsFromWords:
         )
         _make_words_parquet(tmp_path / doc_id, rows)
         with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
-            page, rects = _find_quote_rects_from_words(doc_id, 0, "completely unrelated query xyzzy")
+            page, rects, triggers = _find_quote_rects_from_words(doc_id, 0, "completely unrelated query xyzzy")
         assert rects == []
 
     def test_missing_parquet_returns_empty(self, tmp_path):
@@ -105,7 +150,7 @@ class TestFindQuoteRectsFromWords:
         doc_id = "no_parquet_doc"
         (tmp_path / doc_id).mkdir()
         with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
-            page, rects = _find_quote_rects_from_words(doc_id, 5, "some query")
+            page, rects, triggers = _find_quote_rects_from_words(doc_id, 5, "some query")
         assert page == 5
         assert rects == []
 
@@ -122,11 +167,11 @@ class TestFindQuoteRectsFromWords:
         )
         _make_words_parquet(tmp_path / doc_id, rows)
         with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
-            page, rects = _find_quote_rects_from_words(
+            page, rects, triggers = _find_quote_rects_from_words(
                 doc_id, 0, "Allergies Amoxicillin-Clavulanate"
             )
         assert page == 0
-        assert len(rects) >= 2
+        assert len(rects) == 1  # all three words are on the same line
 
     def test_dotted_abbreviation_nkda_matches(self, tmp_path):
         """'N.K.D.A.' in PDF (→ 'nkda') matches 'NKDA' in quote."""
@@ -139,9 +184,9 @@ class TestFindQuoteRectsFromWords:
         )
         _make_words_parquet(tmp_path / doc_id, rows)
         with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
-            page, rects = _find_quote_rects_from_words(doc_id, 0, "Allergies NKDA Verified")
+            page, rects, triggers = _find_quote_rects_from_words(doc_id, 0, "Allergies NKDA Verified")
         assert page == 0
-        assert len(rects) >= 2
+        assert len(rects) == 1  # all three words are on the same line
 
     # ── Short-quote adaptive threshold ────────────────────────────────────
 
@@ -157,7 +202,7 @@ class TestFindQuoteRectsFromWords:
         ]
         _make_words_parquet(tmp_path / doc_id, _words_df(*(signal + noise)))
         with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
-            page, rects = _find_quote_rects_from_words(doc_id, 0, "Allergies Penicillin")
+            page, rects, triggers = _find_quote_rects_from_words(doc_id, 0, "Allergies Penicillin")
         assert page == 0
         assert len(rects) >= 1
 
@@ -179,11 +224,11 @@ class TestFindQuoteRectsFromWords:
         )
         _make_words_parquet(tmp_path / doc_id, rows)
         with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
-            page, rects = _find_quote_rects_from_words(
+            page, rects, triggers = _find_quote_rects_from_words(
                 doc_id, 0, "Patient discharged hospital stable", page_end=1
             )
         assert page == 1, f"Expected best match on page 1, got page {page}"
-        assert len(rects) >= 3
+        assert len(rects) == 1  # all four words are on the same line → one line rect
 
     def test_page_end_equal_page_num_searches_only_one_page(self, tmp_path):
         """page_end == page_num (or -1) searches only page_num."""
@@ -197,7 +242,7 @@ class TestFindQuoteRectsFromWords:
         )
         _make_words_parquet(tmp_path / doc_id, rows)
         with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
-            page, rects = _find_quote_rects_from_words(doc_id, 0, "alpha beta gamma")
+            page, rects, triggers = _find_quote_rects_from_words(doc_id, 0, "alpha beta gamma")
         assert page == 0
 
     # ── Stopword filtering ────────────────────────────────────────────────
@@ -209,7 +254,7 @@ class TestFindQuoteRectsFromWords:
         rows = _words_df((0, "word", 0, 0, 30, 10))
         _make_words_parquet(tmp_path / doc_id, rows)
         with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
-            page, rects = _find_quote_rects_from_words(doc_id, 0, "")
+            page, rects, triggers = _find_quote_rects_from_words(doc_id, 0, "")
         assert rects == []
         assert page == 0
 
@@ -221,7 +266,7 @@ class TestFindQuoteRectsFromWords:
         rows = _words_df((0, "the", 0, 0, 30, 10), (0, "a", 40, 0, 60, 10))
         _make_words_parquet(tmp_path / doc_id, rows)
         with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
-            page, rects = _find_quote_rects_from_words(doc_id, 0, "the a an is")
+            page, rects, triggers = _find_quote_rects_from_words(doc_id, 0, "the a an is")
         assert isinstance(rects, list)
         assert page == 0
 
@@ -237,9 +282,61 @@ class TestFindQuoteRectsFromWords:
         )
         _make_words_parquet(tmp_path / doc_id, rows)
         with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
-            page, rects = _find_quote_rects_from_words(doc_id, 0, "diagnosis hypertension")
+            page, rects, triggers = _find_quote_rects_from_words(doc_id, 0, "diagnosis hypertension")
         assert page == 0
         assert len(rects) >= 1
+
+    # ── Trigger word rects ────────────────────────────────────────────────
+
+    def test_triggers_are_subset_of_line_bounds(self, tmp_path):
+        """Each trigger word rect must lie within the corresponding line rect bounds."""
+        doc_id = "test_doc"
+        (tmp_path / doc_id).mkdir()
+        rows = _words_df(
+            (0, "The",       0, 50, 25, 62),
+            (0, "patient",   30, 50, 90, 62),
+            (0, "takes",     95, 50, 140, 62),
+            (0, "metformin", 145, 50, 240, 62),
+            (0, "daily.",    245, 50, 300, 62),
+        )
+        _make_words_parquet(tmp_path / doc_id, rows)
+        with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
+            page, rects, triggers = _find_quote_rects_from_words(doc_id, 0, "patient takes metformin")
+        assert len(rects) == 1
+        assert len(triggers) >= 1
+        line = rects[0]
+        for t in triggers:
+            assert t.x0 >= line.x0 - 1
+            assert t.x1 <= line.x1 + 1
+
+    def test_triggers_empty_on_no_match(self, tmp_path):
+        """When no match is found, triggers list is also empty."""
+        doc_id = "test_doc"
+        (tmp_path / doc_id).mkdir()
+        rows = _words_df((0, "nothing", 0, 0, 60, 12))
+        _make_words_parquet(tmp_path / doc_id, rows)
+        with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
+            _, rects, triggers = _find_quote_rects_from_words(doc_id, 0, "xyzzy nomatch")
+        assert rects == []
+        assert triggers == []
+
+    def test_trigger_rects_are_narrower_than_line_rects(self, tmp_path):
+        """Trigger rects (individual matched words) are narrower than the full-line rects."""
+        doc_id = "test_doc"
+        (tmp_path / doc_id).mkdir()
+        rows = _words_df(
+            (0, "The",       0, 0, 25, 12),
+            (0, "patient",   30, 0, 90, 12),
+            (0, "takes",     95, 0, 140, 12),
+            (0, "metformin", 145, 0, 240, 12),
+            (0, "daily.",    245, 0, 300, 12),
+        )
+        _make_words_parquet(tmp_path / doc_id, rows)
+        with patch("nitrag.server.RAG_STORE_ROOT", tmp_path):
+            _, rects, triggers = _find_quote_rects_from_words(doc_id, 0, "metformin")
+        line_width = rects[0].x1 - rects[0].x0
+        trigger_width = triggers[0].x1 - triggers[0].x0
+        assert trigger_width < line_width
 
 
 # ---------------------------------------------------------------------------

@@ -536,6 +536,18 @@ def _draw_highlights(page, rects: list) -> None:
     shape.commit()
 
 
+def _draw_underlines(page, rects: list) -> None:
+    """Draw a solid underline beneath each trigger-word rect using page shapes."""
+    if not rects:
+        return
+    import fitz
+    shape = page.new_shape()
+    for r in rects:
+        shape.draw_line(fitz.Point(r.x0, r.y1 + 1), fitz.Point(r.x1, r.y1 + 1))
+    shape.finish(color=(0.85, 0.45, 0.0), width=1.5, closePath=False)
+    shape.commit()
+
+
 def _find_rects_from_layout(doc_id: str, page_num: int, quote: str) -> list:
     """Fallback for scanned PDFs: match quote words against OCR layout element bboxes.
 
@@ -585,19 +597,22 @@ def _find_quote_rects_from_words(
     returns the page that best matches the quote.  Hyphen-split tokenisation handles
     compound drug names like 'Amoxicillin-Clavulanate'.
 
-    Returns (best_page_num, rects).  rects is empty when no match is found.
+    Returns (best_page_num, line_rects, trigger_word_rects).
+    line_rects:        one rect per matched line (full-width span of the line).
+    trigger_word_rects: individual word rects whose tokens caused the match.
+    Both lists are empty when no match is found.
     """
     import re
     import fitz
 
     words_path = RAG_STORE_ROOT / doc_id / "layout_words.parquet"
     if not words_path.exists():
-        return page_num, []
+        return page_num, [], []
     try:
         import pandas as pd
         df = pd.read_parquet(words_path, columns=["page_number", "text", "x0", "y0", "x1", "y1"])
     except Exception:
-        return page_num, []
+        return page_num, [], []
 
     def _tokens(w: str) -> list:
         """Split on hyphens first, then strip non-alphanumeric from each part."""
@@ -613,7 +628,7 @@ def _find_quote_rects_from_words(
     if len(q_content) < 2:
         q_content = [t for t in q_tokens if t]
     if not q_content:
-        return page_num, []
+        return page_num, [], []
     q_set = set(q_content)
     # Lower threshold for short quotes (allergies = 2-3 words)
     threshold = 0.30 if len(q_set) <= 4 else 0.40
@@ -623,9 +638,10 @@ def _find_quote_rects_from_words(
         if page_end > page_num else [page_num]
     )
 
-    best_page  = page_num
-    best_rects: list = []
-    best_score = 0.0
+    best_page         = page_num
+    best_rects:  list = []
+    best_triggers: list = []
+    best_score        = 0.0
 
     for pn in pages_to_search:
         page_df = df[df["page_number"] == pn].reset_index(drop=True)
@@ -657,18 +673,41 @@ def _find_quote_rects_from_words(
             best_score = pg_best_score
             best_page  = pn
             if pg_best_score >= threshold:
-                rects = []
-                for k in range(pg_best_i, min(pg_best_i + win, n_p)):
-                    if q_set & p_token_sets[k]:
-                        row = page_df.iloc[k]
-                        rects.append(fitz.Rect(float(row["x0"]), float(row["y0"]),
-                                               float(row["x1"]), float(row["y1"])))
-                best_rects = rects
+                # Collect matched word indices within the best window
+                matched_indices = [
+                    k for k in range(pg_best_i, min(pg_best_i + win, n_p))
+                    if q_set & p_token_sets[k]
+                ]
+                # Build trigger word rects + expand each line once (deduplicate by y)
+                line_rects: list = []
+                trigger_rects: list = []
+                seen_y_mids: list = []
+                for mi in matched_indices:
+                    row = page_df.iloc[mi]
+                    y0_m, y1_m = float(row["y0"]), float(row["y1"])
+                    y_mid = (y0_m + y1_m) / 2
+                    # Always record the individual trigger word
+                    trigger_rects.append(fitz.Rect(
+                        float(row["x0"]), y0_m, float(row["x1"]), y1_m
+                    ))
+                    if any(abs(y_mid - sy) < 4 for sy in seen_y_mids):
+                        continue  # line rect already added
+                    seen_y_mids.append(y_mid)
+                    line = page_df[
+                        (page_df["y0"] < y1_m + 2) & (page_df["y1"] > y0_m - 2)
+                    ]
+                    if not line.empty:
+                        line_rects.append(fitz.Rect(
+                            float(line["x0"].min()), float(line["y0"].min()),
+                            float(line["x1"].max()), float(line["y1"].max()),
+                        ))
+                best_rects    = line_rects
+                best_triggers = trigger_rects
 
     if best_score < threshold:
-        return page_num, []
+        return page_num, [], []
 
-    return best_page, best_rects
+    return best_page, best_rects, best_triggers
 
 
 def _quote_match_count(page, quote: str) -> int:
@@ -710,8 +749,9 @@ async def render_page(doc_id: str, page_num: int, q: str = "", page_end: int = -
     # Primary page selection + highlight: word-level bbox search across chunk range
     target_page_num = page_num
     highlight_rects: list = []
+    trigger_rects:   list = []
     if q:
-        target_page_num, highlight_rects = _find_quote_rects_from_words(
+        target_page_num, highlight_rects, trigger_rects = _find_quote_rects_from_words(
             doc_id, page_num, q, page_end=page_end
         )
         page_candidate = doc[target_page_num]
@@ -737,6 +777,7 @@ async def render_page(doc_id: str, page_num: int, q: str = "", page_end: int = -
     page = doc[target_page_num]
     if highlight_rects:
         _draw_highlights(page, highlight_rects)
+        _draw_underlines(page, trigger_rects)
 
     mat = fitz.Matrix(1.8, 1.8)
 
@@ -792,15 +833,20 @@ async def render_page_pdf(doc_id: str, page_num: int, q: str = ""):
     page = out[0]
 
     if q:
-        _, rects = _find_quote_rects_from_words(doc_id, page_num, q)
+        _, rects, trigger_rects = _find_quote_rects_from_words(doc_id, page_num, q)
         if not rects:
             rects = _find_quote_rects(page, q)
+            trigger_rects = []  # no trigger info from fallback paths
         if not rects:
             rects = _find_rects_from_layout(doc_id, page_num, q)
         if rects:
             annot = page.add_highlight_annot(rects)
             annot.set_colors(stroke=(1.0, 0.85, 0.0))  # yellow
             annot.update()
+        if trigger_rects:
+            ul_annot = page.add_underline_annot(trigger_rects)
+            ul_annot.set_colors(stroke=(0.85, 0.45, 0.0))  # amber
+            ul_annot.update()
 
     pdf_bytes = out.tobytes()
     out.close()
