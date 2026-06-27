@@ -225,6 +225,11 @@ sup{line-height:0}
 .answer-text .md-ul li,.answer-text .md-ol li{margin-bottom:4px;line-height:1.7}
 .answer-text strong{font-weight:600;color:var(--text)}
 .answer-text em{font-style:italic;color:var(--muted)}
+.answer-text .md-tbl-wrap{overflow-x:auto;margin:8px 0 12px}
+.answer-text .md-tbl{border-collapse:collapse;width:100%;font-size:13px;line-height:1.5}
+.answer-text .md-tbl th{background:var(--bg);font-weight:600;color:var(--text);padding:7px 12px;text-align:left;border:1px solid var(--border)}
+.answer-text .md-tbl td{padding:6px 12px;border:1px solid var(--border);color:var(--text);vertical-align:top}
+.answer-text .md-tbl tr:nth-child(even) td{background:var(--bg)}
 
 /* ── Summary loading state ──────────────────────────────────── */
 .sum-load-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:55vh;text-align:center;gap:12px;padding:40px 20px}
@@ -495,7 +500,7 @@ sup{line-height:0}
   <!-- ── Evidence panel ── -->
   <aside id="evidence-panel">
     <div class="ep-hd">
-      <div class="ep-ttl">Evidence <span class="ep-ct" id="ep-count">0</span></div>
+      <div class="ep-ttl">Evidence <span class="ep-ct" id="ep-cite-count">0</span> citations · <span class="ep-ct" id="ep-chunk-count">0</span> chunks</div>
       <button id="export-btn" title="Export answer as Markdown">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         Export
@@ -596,7 +601,8 @@ const E = {
   evalNotes:  $('eval-notes'),
   respMeta:   $('response-meta'),
   epBody:     $('ep-body'),
-  epCount:    $('ep-count'),
+  epCiteCount:  $('ep-cite-count'),
+  epChunkCount: $('ep-chunk-count'),
   stagesList: $('stages-list'),
   exQs:       $('example-queries'),
   fileInput:  $('file-input'),
@@ -946,7 +952,7 @@ function showWelcome() {
   E.respContent.classList.remove('active');
   renderExamples(S.doc);
   E.epBody.innerHTML = '<div class="ep-empty"><div class="ep-empty-icon">⚕</div>Ask a question to see evidence</div>';
-  E.epCount.textContent = '0';
+  E.epCiteCount.textContent = '0'; E.epChunkCount.textContent = '0';
 }
 
 function showLoading() {
@@ -965,7 +971,7 @@ function showSummaryLoading(msg) {
   E.sumLoading.style.display = '';
   if (msg) E.sumLoadSub.textContent = msg;
   E.epBody.innerHTML = '<div class="ep-empty"><div class="ep-empty-icon">📋</div>Generating summary…</div>';
-  E.epCount.textContent = '0';
+  E.epCiteCount.textContent = '0'; E.epChunkCount.textContent = '0';
 }
 
 function hideSummaryLoading() { E.sumLoading.style.display = 'none'; }
@@ -1014,7 +1020,7 @@ function renderError(msg, query) {
   E.evalStrip.style.display = 'none';
   E.respMeta.innerHTML = '';
   E.epBody.innerHTML = '<div class="ep-empty"><div class="ep-empty-icon">⚠️</div>Query failed — no evidence</div>';
-  E.epCount.textContent = '0';
+  E.epCiteCount.textContent = '0'; E.epChunkCount.textContent = '0';
 }
 
 // ─── Inline markdown (bold, italic, citations) ───────────────────────────────
@@ -1035,14 +1041,42 @@ function fmtAnswer(raw) {
   const lines = raw.split('\n');
   const out = [];
   let inUl = false, inOl = false;
+  let tableRows = [];  // accumulated raw (unescaped) cell arrays
 
   const closeList = () => {
     if (inUl) { out.push('</ul>'); inUl = false; }
     if (inOl) { out.push('</ol>'); inOl = false; }
   };
 
+  const flushTable = () => {
+    if (!tableRows.length) return;
+    const isSep = row => row.every(c => /^[-: ]+$/.test(c));
+    const [header, ...rest] = tableRows;
+    const body = rest.filter(r => !isSep(r));
+    out.push('<div class="md-tbl-wrap"><table class="md-tbl">');
+    out.push('<thead><tr>' + header.map(c => `<th>${inlineMd(e(c))}</th>`).join('') + '</tr></thead>');
+    if (body.length) {
+      out.push('<tbody>');
+      body.forEach(r => out.push('<tr>' + r.map(c => `<td>${inlineMd(e(c))}</td>`).join('') + '</tr>'));
+      out.push('</tbody>');
+    }
+    out.push('</table></div>');
+    tableRows = [];
+  };
+
   for (const raw_line of lines) {
     const line = raw_line.trimEnd();
+
+    // Table row: starts and ends with |
+    if (/^\|.+\|/.test(line)) {
+      closeList();
+      const cells = line.split('|').slice(1, -1).map(c => c.trim());
+      tableRows.push(cells);
+      continue;
+    }
+
+    // Flush any open table when we hit a non-table line
+    if (tableRows.length) flushTable();
 
     // ATX headings
     const h3 = line.match(/^### (.+)/);  if (h3) { closeList(); out.push(`<h4 class="md-h4">${inlineMd(e(h3[1]))}</h4>`); continue; }
@@ -1076,6 +1110,7 @@ function fmtAnswer(raw) {
     out.push(`<p class="md-p"${pCiteAttr}>${inlineMd(e(line))}</p>`);
   }
 
+  flushTable();
   closeList();
   return out.join('');
 }
@@ -1111,15 +1146,24 @@ function renderMeta(data) {
 }
 
 // ─── Evidence panel ───────────────────────────────────────────────────────────
+function updateEpCounts() {
+  E.epCiteCount.textContent  = (S.response?.citations       || []).length;
+  E.epChunkCount.textContent = (S.response?.context?.chunks || []).length;
+}
+
 function renderEvidence() {
-  if (!S.response) { E.epBody.innerHTML = '<div class="ep-empty"><div class="ep-empty-icon">⚕</div>Ask a question to see evidence</div>'; E.epCount.textContent='0'; return; }
+  if (!S.response) {
+    E.epBody.innerHTML = '<div class="ep-empty"><div class="ep-empty-icon">⚕</div>Ask a question to see evidence</div>';
+    E.epCiteCount.textContent = '0'; E.epChunkCount.textContent = '0';
+    return;
+  }
+  updateEpCounts();
   if (S.tab === 'citations') renderCitations();
   else renderAllChunks();
 }
 
 function renderCitations() {
   const cites = S.response.citations || [];
-  E.epCount.textContent = cites.length;
   if (!cites.length) { E.epBody.innerHTML = '<div class="ep-empty"><div class="ep-empty-icon">📋</div>No citations in this answer</div>'; return; }
 
   const byN = {};
@@ -1236,7 +1280,6 @@ async function triggerSummaryGeneration() {
 
 function renderAllChunks() {
   const chs = S.response.context?.chunks||[];
-  E.epCount.textContent = chs.length;
   if (!chs.length) { E.epBody.innerHTML = '<div class="ep-empty"><div class="ep-empty-icon">📋</div>No chunks retrieved</div>'; return; }
   E.epBody.innerHTML = chs.map(ch => {
     const page = ch.page_start===ch.page_end?`Page ${ch.page_start+1}`:`Pages ${ch.page_start+1}–${ch.page_end+1}`;

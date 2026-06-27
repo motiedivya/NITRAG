@@ -576,69 +576,99 @@ def _find_rects_from_layout(doc_id: str, page_num: int, quote: str) -> list:
     return matched
 
 
-def _find_quote_rects_from_words(doc_id: str, page_num: int, quote: str) -> list:
+def _find_quote_rects_from_words(
+    doc_id: str, page_num: int, quote: str, page_end: int = -1
+) -> tuple:
     """Primary highlight strategy: word-level bbox matching via layout_words.parquet.
 
-    More reliable than search_for() for GlyphLessFont / OCR-injected PDFs because
-    it uses pre-computed bboxes from ingestion instead of live PDF text extraction.
-    Returns one Rect per matched content word — caller draws highlights.
+    Searches across [page_num, page_end] (inclusive) when page_end > page_num and
+    returns the page that best matches the quote.  Hyphen-split tokenisation handles
+    compound drug names like 'Amoxicillin-Clavulanate'.
+
+    Returns (best_page_num, rects).  rects is empty when no match is found.
     """
     import re
     import fitz
 
     words_path = RAG_STORE_ROOT / doc_id / "layout_words.parquet"
     if not words_path.exists():
-        return []
+        return page_num, []
     try:
         import pandas as pd
         df = pd.read_parquet(words_path, columns=["page_number", "text", "x0", "y0", "x1", "y1"])
     except Exception:
-        return []
+        return page_num, []
 
-    page_df = df[df["page_number"] == page_num].reset_index(drop=True)
-    if page_df.empty:
-        return []
+    def _tokens(w: str) -> list:
+        """Split on hyphens first, then strip non-alphanumeric from each part."""
+        parts = re.split(r"-", str(w))
+        return [re.sub(r"[^a-z0-9]", "", p.lower()) for p in parts
+                if re.sub(r"[^a-z0-9]", "", p.lower())]
 
-    def norm(w):
-        return re.sub(r"[^a-z0-9]", "", str(w).lower())
-
-    q_norm = [norm(w) for w in quote.split()]
-    # Prefer content words for scoring; fall back to all if too few
-    q_content = [w for w in q_norm if len(w) >= 3 and w not in _HIGHLIGHT_STOP]
+    # Build query token set from content words only
+    q_tokens = []
+    for raw in quote.split():
+        q_tokens.extend(_tokens(raw))
+    q_content = [t for t in q_tokens if len(t) >= 3 and t not in _HIGHLIGHT_STOP]
     if len(q_content) < 2:
-        q_content = [w for w in q_norm if w]
+        q_content = [t for t in q_tokens if t]
     if not q_content:
-        return []
+        return page_num, []
     q_set = set(q_content)
+    # Lower threshold for short quotes (allergies = 2-3 words)
+    threshold = 0.30 if len(q_set) <= 4 else 0.40
 
-    p_texts = page_df["text"].tolist()
-    p_norm = [norm(w) for w in p_texts]
-    n_p = len(p_norm)
-    n_q = len(q_norm)
-    if n_p < 2 or n_q < 1:
-        return []
+    pages_to_search = (
+        range(page_num, min(page_end, page_num + 6) + 1)
+        if page_end > page_num else [page_num]
+    )
 
-    # Sliding window: allow ~25% slack for OCR-inserted noise words
-    win = min(n_q + max(4, n_q // 4), n_p)
+    best_page  = page_num
+    best_rects: list = []
+    best_score = 0.0
 
-    best_score, best_i = 0.0, 0
-    for i in range(n_p - win + 1):
-        hits = sum(1 for w in p_norm[i:i + win] if w in q_set)
-        score = hits / len(q_set)
-        if score > best_score:
-            best_score = score
-            best_i = i
+    for pn in pages_to_search:
+        page_df = df[df["page_number"] == pn].reset_index(drop=True)
+        if page_df.empty:
+            continue
 
-    if best_score < 0.40:
-        return []
+        p_texts = page_df["text"].tolist()
+        # Each page-word expands to a set of tokens (handles compound words)
+        p_token_sets = [set(_tokens(w)) for w in p_texts]
+        n_p = len(p_texts)
+        if n_p < 1:
+            continue
 
-    rects = []
-    for k in range(best_i, min(best_i + win, n_p)):
-        if p_norm[k] in q_set:
-            row = page_df.iloc[k]
-            rects.append(fitz.Rect(float(row["x0"]), float(row["y0"]),
-                                   float(row["x1"]), float(row["y1"])))
-    return rects
+        n_q = len(q_tokens)
+        win = min(n_q + max(4, n_q // 4), n_p)
+
+        pg_best_score, pg_best_i = 0.0, 0
+        for i in range(max(n_p - win + 1, 1)):
+            window_tokens: set = set()
+            for ts in p_token_sets[i:i + win]:
+                window_tokens |= ts
+            hits  = len(q_set & window_tokens)
+            score = hits / len(q_set)
+            if score > pg_best_score:
+                pg_best_score = score
+                pg_best_i     = i
+
+        if pg_best_score > best_score:
+            best_score = pg_best_score
+            best_page  = pn
+            if pg_best_score >= threshold:
+                rects = []
+                for k in range(pg_best_i, min(pg_best_i + win, n_p)):
+                    if q_set & p_token_sets[k]:
+                        row = page_df.iloc[k]
+                        rects.append(fitz.Rect(float(row["x0"]), float(row["y0"]),
+                                               float(row["x1"]), float(row["y1"])))
+                best_rects = rects
+
+    if best_score < threshold:
+        return page_num, []
+
+    return best_page, best_rects
 
 
 def _quote_match_count(page, quote: str) -> int:
@@ -677,31 +707,35 @@ async def render_page(doc_id: str, page_num: int, q: str = "", page_end: int = -
     if page_num < 0 or page_num >= len(doc):
         raise HTTPException(400, f"Page {page_num} out of range (0–{len(doc)-1})")
 
-    # Find the page in the chunk range that best matches the quote
+    # Primary page selection + highlight: word-level bbox search across chunk range
     target_page_num = page_num
-    if q and page_end > page_num:
-        end = min(page_end, page_num + 5, len(doc) - 1)
-        best_count = _quote_match_count(doc[page_num], q)
-        for pn in range(page_num + 1, end + 1):
-            c = _quote_match_count(doc[pn], q)
-            if c > best_count:
-                best_count = c
-                target_page_num = pn
-            if best_count > 0 and c == 0:
-                break
-
-    page = doc[target_page_num]
-
     highlight_rects: list = []
     if q:
-        # Primary: word-level bboxes from layout_words.parquet (most accurate)
-        highlight_rects = _find_quote_rects_from_words(doc_id, target_page_num, q)
+        target_page_num, highlight_rects = _find_quote_rects_from_words(
+            doc_id, page_num, q, page_end=page_end
+        )
+        page_candidate = doc[target_page_num]
         # Secondary: exact/fragment search via PyMuPDF search_for()
         if not highlight_rects:
-            highlight_rects = _find_quote_rects(page, q)
+            # Re-run page selection with search_for() when word-level fails
+            if page_end > page_num:
+                end = min(page_end, page_num + 5, len(doc) - 1)
+                best_count = _quote_match_count(doc[page_num], q)
+                for pn in range(page_num + 1, end + 1):
+                    c = _quote_match_count(doc[pn], q)
+                    if c > best_count:
+                        best_count = c
+                        target_page_num = pn
+                    if best_count > 0 and c == 0:
+                        break
+                page_candidate = doc[target_page_num]
+            highlight_rects = _find_quote_rects(page_candidate, q)
         # Tertiary: OCR layout element bboxes (block-level fallback)
         if not highlight_rects:
             highlight_rects = _find_rects_from_layout(doc_id, target_page_num, q)
+
+    page = doc[target_page_num]
+    if highlight_rects:
         _draw_highlights(page, highlight_rects)
 
     mat = fitz.Matrix(1.8, 1.8)
@@ -758,7 +792,7 @@ async def render_page_pdf(doc_id: str, page_num: int, q: str = ""):
     page = out[0]
 
     if q:
-        rects = _find_quote_rects_from_words(doc_id, page_num, q)
+        _, rects = _find_quote_rects_from_words(doc_id, page_num, q)
         if not rects:
             rects = _find_quote_rects(page, q)
         if not rects:
