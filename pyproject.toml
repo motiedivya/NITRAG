@@ -37,6 +37,9 @@ sentence-transformers = ["sentence-transformers>=3.0", "torch>=2.0"]
 # pip install nitrag[qdrant] — Qdrant vector database backend
 qdrant = ["qdrant-client>=1.9"]
 
+[tool.setuptools.packages.find]
+include = ["nitrag*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
