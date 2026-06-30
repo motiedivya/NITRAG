@@ -1,0 +1,19 @@
+[Unit]
+Description=NITRAG Medical RAG Server (production)
+After=network-online.target nsqd.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/nitrag
+# .env is read by server.py _load_dotenv() — keep it at /opt/nitrag/.env
+ExecStart=/opt/nitrag/.venv/bin/python scripts/start_server.py --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=10
+# Give the embedding model time to load on first request
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nitrag-server
+
+[Install]
+WantedBy=multi-user.target

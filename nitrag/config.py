@@ -347,3 +347,45 @@ class RAGConfig:
                 min_citation_confidence=0.2,
             ),
         )
+
+    @classmethod
+    def qwen_6kpro(cls) -> "RAGConfig":
+        """6kpro GPU server: fastembed (nomic-embed-v1.5, CPU) + Qwen3-VL-8B via vLLM.
+
+        Reads VLLM_BASE_URL env var; falls back to http://172.16.5.100:8000/v1.
+        No GPU required on the machine running this config — only the 6kpro vLLM needs GPU.
+        """
+        import os
+        vllm_url = os.environ.get("VLLM_BASE_URL", "http://172.16.5.100:8000/v1")
+        vllm_key = os.environ.get("VLLM_API_KEY", "dummy")
+        return cls(
+            embedding=EmbeddingConfig(
+                provider="fastembed",
+                model_name="nomic-ai/nomic-embed-text-v1.5",
+                dimensions=768,
+                batch_size=64,
+            ),
+            llm=LLMConfig(
+                provider="openai_compatible",
+                model_name="Qwen/Qwen3-VL-8B-Instruct",
+                base_url=vllm_url,
+                api_key=vllm_key,
+                temperature=0.1,
+                max_tokens=4096,
+            ),
+            vector_index=VectorIndexConfig(backend="faiss", index_type="hnsw"),
+            retrieval=RetrievalConfig(
+                retriever_names=["bm25", "dense", "hybrid"],
+                chunk_strategy_name="block_group_800_overlap_1",
+                reranker_name="hybrid_weighted",
+                top_k_retrieve=20,
+                top_k_rerank=5,
+                use_hyde=False,
+                query_expansion=True,
+            ),
+            generation=GenerationConfig(
+                max_context_tokens=4000,
+                hallucination_check=True,
+                min_citation_confidence=0.25,
+            ),
+        )

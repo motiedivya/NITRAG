@@ -61,10 +61,11 @@ _pipeline_cache: Dict[str, Any] = {}       # "{doc_id}:{preset}" → RAGPipeline
 _processing_status: Dict[str, Dict] = {}   # doc_id → {stage, error, done}
 
 CONFIG_PRESETS = {
+    "openai_cloud": "OpenAI Cloud (gpt-4o + text-embedding-3-small)",
+    "qwen_6kpro": "6kpro GPU (Qwen3-VL-8B via vLLM + nomic-embed)",
+    "medical_precise": "Medical Precise (HyDE + wide retrieval, needs large LLM)",
     "local_ollama": "Local Ollama (llama3.1:8b + nomic-embed)",
     "fast_local": "Fast Local (mistral:7b + bge-small)",
-    "openai_cloud": "OpenAI Cloud (gpt-4o + text-embedding-3-small)",
-    "medical_precise": "Medical Precise (HyDE + wide retrieval)",
 }
 
 NARRATIVE_SUMMARY_PROMPT = """\
