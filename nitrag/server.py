@@ -234,7 +234,7 @@ def _generate_narrative_summary(doc_id: str) -> None:
         register_default_chunkers(cm)
         cm.execute("sentence_based")
 
-    config = RAGConfig.openai_cloud()
+    config = RAGConfig.from_env()
     config.llm.system_prompt = NARRATIVE_SUMMARY_PROMPT
     config.generation.max_context_tokens = 32000   # fit entire document
     config.generation.context_ordering = "page"    # chronological order
@@ -1018,9 +1018,9 @@ def _run_full_pipeline(pdf_path: str, doc_id_hint: Optional[str], use_ocr: bool 
         register_default_indexers(index_mgr)
         index_mgr.execute_all(continue_on_error=True, overwrite=True)
 
-        # Stage 6 — embeddings
+        # Stage 6 — embeddings (use env-configured preset so fastembed works without OpenAI)
         _emit(_id, "embeddings", "running")
-        rag_config = RAGConfig.openai_cloud()
+        rag_config = RAGConfig.from_env()
         em = EmbeddingManager(store, rag_config.embedding)
         em.embed_all_strategies(use_enriched=True, overwrite=True)
 
