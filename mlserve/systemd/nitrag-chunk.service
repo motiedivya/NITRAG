@@ -1,0 +1,22 @@
+[Unit]
+Description=NITRAG Chunk Consumer (tiktoken, CPU)
+After=nsqd.service
+Wants=nsqd.service
+
+[Service]
+WorkingDirectory=/opt/nitrag
+Environment=NSQ_NSQD_TCP=127.0.0.1:4150
+Environment=NSQ_LOOKUPD_HTTP=http://127.0.0.1:4161
+Environment=CHUNK_SIZE=800
+Environment=CHUNK_OVERLAP=80
+Environment=TIKTOKEN_MODEL=gpt-4o
+Environment=PYTHONPATH=/opt/nitrag
+ExecStart=/opt/nitrag-venv/bin/python -m mlserve.consumers.chunk_consumer
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nitrag-chunk
+
+[Install]
+WantedBy=multi-user.target

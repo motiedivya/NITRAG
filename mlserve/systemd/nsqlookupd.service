@@ -1,0 +1,17 @@
+[Unit]
+Description=NSQ Lookup Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/nsqlookupd \
+    --tcp-address=0.0.0.0:4160 \
+    --http-address=0.0.0.0:4161
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nsqlookupd
+
+[Install]
+WantedBy=multi-user.target

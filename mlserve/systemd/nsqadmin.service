@@ -1,0 +1,17 @@
+[Unit]
+Description=NSQ Admin UI
+After=nsqlookupd.service
+Wants=nsqlookupd.service
+
+[Service]
+ExecStart=/usr/local/bin/nsqadmin \
+    --lookupd-http-address=127.0.0.1:4161 \
+    --http-address=0.0.0.0:4171
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nsqadmin
+
+[Install]
+WantedBy=multi-user.target

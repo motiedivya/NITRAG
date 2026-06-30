@@ -1,0 +1,23 @@
+[Unit]
+Description=NITRAG PaddleOCR Consumer (GPU)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/nitrag
+# NSQ daemon runs on mlcpu; point consumers at it
+Environment=NSQ_NSQD_TCP=10.9.0.36:4150
+Environment=NSQ_LOOKUPD_HTTP=http://10.9.0.36:4161
+Environment=PADDLE_LANG=en
+Environment=PADDLE_USE_GPU=1
+Environment=PYTHONPATH=/opt/nitrag
+# Use the paddle-ocr venv which already has pynsq 0.9.1 + openai 2.x
+ExecStart=/opt/paddle-ocr/bin/python -m mlserve.consumers.paddleocr_consumer
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nitrag-ocr
+
+[Install]
+WantedBy=multi-user.target

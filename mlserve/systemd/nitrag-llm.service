@@ -1,0 +1,23 @@
+[Unit]
+Description=NITRAG LLM Consumer (Qwen3-VL via vLLM)
+After=qwen-vllm.service
+Wants=qwen-vllm.service
+
+[Service]
+WorkingDirectory=/opt/nitrag
+Environment=NSQ_NSQD_TCP=10.9.0.36:4150
+Environment=NSQ_LOOKUPD_HTTP=http://10.9.0.36:4161
+Environment=VLLM_BASE_URL=http://localhost:8000/v1
+Environment=VLLM_API_KEY=dummy
+Environment=LLM_DEFAULT_MODEL=Qwen/Qwen3-VL-8B-Instruct
+Environment=LLM_TIMEOUT=120
+Environment=PYTHONPATH=/opt/nitrag
+ExecStart=/opt/paddle-ocr/bin/python -m mlserve.consumers.llm_consumer
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nitrag-llm
+
+[Install]
+WantedBy=multi-user.target

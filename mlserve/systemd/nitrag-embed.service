@@ -1,0 +1,21 @@
+[Unit]
+Description=NITRAG Embedding Consumer (fastembed, CPU)
+After=nsqd.service
+Wants=nsqd.service
+
+[Service]
+WorkingDirectory=/opt/nitrag
+Environment=NSQ_NSQD_TCP=127.0.0.1:4150
+Environment=NSQ_LOOKUPD_HTTP=http://127.0.0.1:4161
+Environment=EMBED_MODEL=nomic-ai/nomic-embed-text-v1.5
+Environment=EMBED_BATCH_SIZE=64
+Environment=PYTHONPATH=/opt/nitrag
+ExecStart=/opt/nitrag-venv/bin/python -m mlserve.consumers.embed_consumer
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nitrag-embed
+
+[Install]
+WantedBy=multi-user.target
